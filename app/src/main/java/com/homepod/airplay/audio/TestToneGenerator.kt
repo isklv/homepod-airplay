@@ -24,7 +24,6 @@ class TestToneGenerator(
             val sampleRate = 44100
             val framesPerChunk = 352
             val chunkBytes = framesPerChunk * 4
-            val buffer = ByteArray(chunkBytes)
 
             // Musical arpeggio notes: A4 (440Hz), C#5 (554Hz), E5 (659Hz), A5 (880Hz)
             val chordNotes = doubleArrayOf(440.0, 554.37, 659.25, 880.0)
@@ -32,28 +31,32 @@ class TestToneGenerator(
             var phase = 0.0
             var sampleCounter = 0
 
+            val frameDurationNs = (1_000_000_000L * framesPerChunk) / sampleRate
+            var nextTimeNs = System.nanoTime()
+
             while (isActive && isPlaying) {
                 val currentFreq = chordNotes[noteIndex]
                 val phaseIncrement = (2.0 * Math.PI * currentFreq) / sampleRate
 
+                val chunk = ByteArray(chunkBytes)
                 var idx = 0
                 for (i in 0 until framesPerChunk) {
-                    val envelope = 0.25 // comfortable volume
+                    val envelope = 0.20 // comfortable, clean volume
                     val sampleVal = (sin(phase) * envelope * 32767.0).toInt().coerceIn(-32768, 32767)
                     phase += phaseIncrement
                     if (phase >= 2.0 * Math.PI) {
                         phase -= 2.0 * Math.PI
                     }
 
-                    // Left channel
-                    buffer[idx++] = (sampleVal and 0xFF).toByte()
-                    buffer[idx++] = ((sampleVal shr 8) and 0xFF).toByte()
+                    // Left channel (Little-Endian: low byte first, high byte second)
+                    chunk[idx++] = (sampleVal and 0xFF).toByte()
+                    chunk[idx++] = ((sampleVal shr 8) and 0xFF).toByte()
                     // Right channel
-                    buffer[idx++] = (sampleVal and 0xFF).toByte()
-                    buffer[idx++] = ((sampleVal shr 8) and 0xFF).toByte()
+                    chunk[idx++] = (sampleVal and 0xFF).toByte()
+                    chunk[idx++] = ((sampleVal shr 8) and 0xFF).toByte()
                 }
 
-                onAudioChunkGenerated(buffer, chunkBytes)
+                onAudioChunkGenerated(chunk, chunkBytes)
 
                 sampleCounter += framesPerChunk
                 if (sampleCounter >= sampleRate / 2) { // Change note every 500ms
@@ -61,8 +64,13 @@ class TestToneGenerator(
                     noteIndex = (noteIndex + 1) % chordNotes.size
                 }
 
-                // Small delay to simulate real-time audio generation
-                delay(7)
+                nextTimeNs += frameDurationNs
+                val sleepNs = nextTimeNs - System.nanoTime()
+                if (sleepNs > 2_000_000) {
+                    delay(sleepNs / 1_000_000)
+                } else if (sleepNs < -50_000_000) {
+                    nextTimeNs = System.nanoTime()
+                }
             }
         }
     }

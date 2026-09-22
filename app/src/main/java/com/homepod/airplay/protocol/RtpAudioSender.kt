@@ -44,7 +44,10 @@ class RtpAudioSender(
     private var serverPort = 0
     private var serverCtrlPort = 0
 
-    private val audioQueue = ArrayBlockingQueue<ByteArray>(64)
+    private val audioQueue = ArrayBlockingQueue<ByteArray>(128)
+    private val accumulatorLock = Any()
+    private val accumulator = ByteArray(CHUNK_SIZE * 4)
+    private var accumulatorCount = 0
     private var streamJob: Job? = null
     private var timingJob: Job? = null
 
@@ -163,6 +166,9 @@ class RtpAudioSender(
         streamJob?.cancel()
         timingJob?.cancel()
         audioQueue.clear()
+        synchronized(accumulatorLock) {
+            accumulatorCount = 0
+        }
 
         try { audioSocket?.close() } catch (_: Exception) {}
         try { controlSocket?.close() } catch (_: Exception) {}
@@ -174,17 +180,32 @@ class RtpAudioSender(
     }
 
     fun queueAudio(pcmData: ByteArray, length: Int) {
-        if (!isStreaming) return
+        if (!isStreaming || length <= 0) return
 
-        var offset = 0
-        while (offset + CHUNK_SIZE <= length) {
-            val chunk = ByteArray(CHUNK_SIZE)
-            System.arraycopy(pcmData, offset, chunk, 0, CHUNK_SIZE)
-            if (!audioQueue.offer(chunk)) {
-                audioQueue.poll()
-                audioQueue.offer(chunk)
+        synchronized(accumulatorLock) {
+            var srcOffset = 0
+            var remaining = length
+
+            while (remaining > 0) {
+                val needed = CHUNK_SIZE - accumulatorCount
+                val toCopy = Math.min(remaining, needed)
+                System.arraycopy(pcmData, srcOffset, accumulator, accumulatorCount, toCopy)
+                accumulatorCount += toCopy
+                srcOffset += toCopy
+                remaining -= toCopy
+
+                if (accumulatorCount == CHUNK_SIZE) {
+                    val chunk = ByteArray(CHUNK_SIZE)
+                    System.arraycopy(accumulator, 0, chunk, 0, CHUNK_SIZE)
+                    accumulatorCount = 0
+
+                    if (!audioQueue.offer(chunk)) {
+                        // Queue full: drop oldest chunk to maintain real-time low latency
+                        audioQueue.poll()
+                        audioQueue.offer(chunk)
+                    }
+                }
             }
-            offset += CHUNK_SIZE
         }
     }
 
@@ -198,13 +219,23 @@ class RtpAudioSender(
             // Initial sync packet
             sendSyncPacket(destAddress, isFirst = true)
 
+            // Pre-buffer a few chunks (e.g. 12 chunks ~ 96ms) to avoid queue underrun at start
+            var prebufferWait = 0
+            while (isActive && isStreaming && audioQueue.size < 12 && prebufferWait < 40) {
+                kotlinx.coroutines.delay(10)
+                prebufferWait++
+            }
+
             val frameDurationNs = (1_000_000_000L * FRAMES_PER_PACKET / 44100L)
             var nextPacketTimeNs = System.nanoTime()
 
-            Log.d(TAG, "Audio streaming loop started to $targetIp:$serverPort")
+            Log.d(TAG, "Audio streaming loop started to $targetIp:$serverPort (initial queue size: ${audioQueue.size})")
+
+            val silenceChunk = ByteArray(CHUNK_SIZE)
 
             while (isActive && isStreaming) {
-                val chunk = audioQueue.poll(15, TimeUnit.MILLISECONDS) ?: ByteArray(CHUNK_SIZE)
+                // Non-blocking poll first, very brief wait if needed to avoid CPU clock stalling
+                val chunk = audioQueue.poll() ?: audioQueue.poll(2, TimeUnit.MILLISECONDS) ?: silenceChunk
 
                 encodeAndSendChunk(socket, audioPacket, chunk)
 
@@ -217,6 +248,7 @@ class RtpAudioSender(
                 if (sleepNs > 1_000_000) {
                     TimeUnit.NANOSECONDS.sleep(sleepNs)
                 } else if (sleepNs < -50_000_000) {
+                    // Clock slipped more than 50ms, re-align
                     nextPacketTimeNs = System.nanoTime()
                 }
             }
@@ -300,7 +332,7 @@ class RtpAudioSender(
             bb.put(0xD4.toByte()) // m=1, PT=84
             bb.putShort(7)
 
-            val latency = 44100
+            val latency = 66150 // 1500 ms at 44100 Hz (matching PipeWire DEFAULT_LATENCY_MS 1500)
             val currentRtp = (rtpTimestamp - latency).toInt()
             bb.putInt(currentRtp)
 

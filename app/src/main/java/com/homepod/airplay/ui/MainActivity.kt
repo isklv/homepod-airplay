@@ -131,6 +131,10 @@ class MainActivity : ComponentActivity() {
 
     private fun handleIncomingIntent(intent: Intent?) {
         if (intent == null) return
+        if (intent.action == AirPlayAudioService.ACTION_STOP_STREAM) {
+            audioService?.stopStreaming()
+            return
+        }
         if (intent.action == AirPlayAudioService.ACTION_START_STREAM) {
             val service = audioService
             if (!isBound || service == null) {
