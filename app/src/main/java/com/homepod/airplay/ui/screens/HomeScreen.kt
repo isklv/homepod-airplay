@@ -86,6 +86,8 @@ fun HomeScreen(
     isScanning: Boolean,
     currentVolume: Float,
     selectedSource: AudioSourceType,
+    mutePhoneSpeaker: Boolean = true,
+    onToggleMutePhoneSpeaker: (Boolean) -> Unit = {},
     onSourceSelected: (AudioSourceType) -> Unit,
     onRefreshScan: () -> Unit,
     onConnectDevice: (AirPlayDevice) -> Unit,
@@ -150,6 +152,8 @@ fun HomeScreen(
                     streamState = streamState,
                     currentVolume = currentVolume,
                     selectedSource = selectedSource,
+                    mutePhoneSpeaker = mutePhoneSpeaker,
+                    onToggleMutePhoneSpeaker = onToggleMutePhoneSpeaker,
                     onSourceSelected = onSourceSelected,
                     onStopStreaming = onStopStreaming,
                     onVolumeChanged = onVolumeChanged
@@ -368,6 +372,8 @@ fun ActiveStreamingCard(
     streamState: StreamState,
     currentVolume: Float,
     selectedSource: AudioSourceType,
+    mutePhoneSpeaker: Boolean,
+    onToggleMutePhoneSpeaker: (Boolean) -> Unit,
     onSourceSelected: (AudioSourceType) -> Unit,
     onStopStreaming: () -> Unit,
     onVolumeChanged: (Float) -> Unit
@@ -392,7 +398,7 @@ fun ActiveStreamingCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                     Box(
                         modifier = Modifier
                             .size(44.dp)
@@ -444,8 +450,8 @@ fun ActiveStreamingCard(
                 }
             }
 
-            AnimatedVisibility(visible = isStreaming) {
-                Column(modifier = Modifier.padding(top = 16.dp)) {
+            Column(modifier = Modifier.padding(top = 14.dp)) {
+                if (isStreaming) {
                     // Volume Control
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -469,34 +475,65 @@ fun ActiveStreamingCard(
                             modifier = Modifier.width(36.dp)
                         )
                     }
-
                     Spacer(modifier = Modifier.height(10.dp))
+                }
 
-                    // Audio Source Selector
+                // Audio Source Selector
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = selectedSource == AudioSourceType.SYSTEM_CAPTURE,
+                        onClick = { onSourceSelected(AudioSourceType.SYSTEM_CAPTURE) },
+                        label = { Text("System Audio (Any App)") },
+                        leadingIcon = {
+                            if (selectedSource == AudioSourceType.SYSTEM_CAPTURE) {
+                                Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    )
+
+                    FilterChip(
+                        selected = selectedSource == AudioSourceType.TEST_TONE,
+                        onClick = { onSourceSelected(AudioSourceType.TEST_TONE) },
+                        label = { Text("Test Tone") },
+                        leadingIcon = {
+                            if (selectedSource == AudioSourceType.TEST_TONE) {
+                                Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    )
+                }
+
+                // Mute phone speaker option for system capture
+                if (selectedSource == AudioSourceType.SYSTEM_CAPTURE) {
+                    Spacer(modifier = Modifier.height(10.dp))
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.65f))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        FilterChip(
-                            selected = selectedSource == AudioSourceType.SYSTEM_CAPTURE,
-                            onClick = { onSourceSelected(AudioSourceType.SYSTEM_CAPTURE) },
-                            label = { Text("System Audio (Any App)") },
-                            leadingIcon = {
-                                if (selectedSource == AudioSourceType.SYSTEM_CAPTURE) {
-                                    Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
-                                }
-                            }
-                        )
-
-                        FilterChip(
-                            selected = selectedSource == AudioSourceType.TEST_TONE,
-                            onClick = { onSourceSelected(AudioSourceType.TEST_TONE) },
-                            label = { Text("Test Tone") },
-                            leadingIcon = {
-                                if (selectedSource == AudioSourceType.TEST_TONE) {
-                                    Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(16.dp))
-                                }
-                            }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Заглушить динамик телефона",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp
+                            )
+                            Text(
+                                "Звук пойдет только на HomePod (динамики телефона не будут играть)",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        androidx.compose.material3.Switch(
+                            checked = mutePhoneSpeaker,
+                            onCheckedChange = onToggleMutePhoneSpeaker
                         )
                     }
                 }

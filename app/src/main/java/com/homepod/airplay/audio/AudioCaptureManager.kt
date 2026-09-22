@@ -93,6 +93,9 @@ class AudioCaptureManager(
                         } else {
                             onAudioChunkCaptured(readBuffer, readBytes)
                         }
+                    } else if (readBytes < 0) {
+                        Log.w(TAG, "AudioRecord.read returned error: $readBytes")
+                        kotlinx.coroutines.delay(10)
                     }
                 }
             }

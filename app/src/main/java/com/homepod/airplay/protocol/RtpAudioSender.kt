@@ -75,11 +75,25 @@ class RtpAudioSender(
     private var packetCount = 0
 
     init {
-        controlSocket = DatagramSocket()
+        controlSocket = DatagramSocket().apply {
+            try {
+                sendBufferSize = 64 * 1024
+                receiveBufferSize = 64 * 1024
+            } catch (_: Exception) {}
+        }
         network?.let { NetworkUtils.bindSocketToWifi(it, controlSocket) }
-        timingSocket = DatagramSocket()
+        timingSocket = DatagramSocket().apply {
+            try {
+                sendBufferSize = 64 * 1024
+                receiveBufferSize = 64 * 1024
+            } catch (_: Exception) {}
+        }
         network?.let { NetworkUtils.bindSocketToWifi(it, timingSocket) }
-        audioSocket = DatagramSocket()
+        audioSocket = DatagramSocket().apply {
+            try {
+                sendBufferSize = 256 * 1024
+            } catch (_: Exception) {}
+        }
         network?.let { NetworkUtils.bindSocketToWifi(it, audioSocket) }
     }
 
@@ -103,6 +117,7 @@ class RtpAudioSender(
 
             while (isActive && isTimingListening) {
                 try {
+                    recvPacket.length = recvBuffer.size
                     socket.receive(recvPacket)
                     val len = recvPacket.length
                     if (len >= 32) {

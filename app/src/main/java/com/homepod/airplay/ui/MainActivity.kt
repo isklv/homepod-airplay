@@ -11,6 +11,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.view.KeyEvent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -103,6 +104,8 @@ class MainActivity : ComponentActivity() {
                 val isScanning by airPlayDiscovery.isScanning.collectAsState()
                 val currentVolume by (audioService?.currentVolume ?: kotlinx.coroutines.flow.emptyFlow())
                     .collectAsState(initial = 50f)
+                val mutePhoneSpeaker by (audioService?.mutePhoneSpeaker ?: kotlinx.coroutines.flow.emptyFlow())
+                    .collectAsState(initial = true)
 
                 HomeScreen(
                     streamState = streamState,
@@ -110,6 +113,8 @@ class MainActivity : ComponentActivity() {
                     isScanning = isScanning,
                     currentVolume = currentVolume,
                     selectedSource = selectedSourceType,
+                    mutePhoneSpeaker = mutePhoneSpeaker,
+                    onToggleMutePhoneSpeaker = { audioService?.setMutePhoneSpeaker(it) },
                     onSourceSelected = { selectedSourceType = it },
                     onRefreshScan = { airPlayDiscovery.startDiscovery() },
                     onConnectDevice = { device -> handleConnectDevice(device) },
@@ -215,5 +220,24 @@ class MainActivity : ComponentActivity() {
         if (needsRequest) {
             permissionLauncher.launch(permissions.toTypedArray())
         }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        val service = audioService
+        if (service != null && service.streamState.value is StreamState.Streaming) {
+            when (keyCode) {
+                KeyEvent.KEYCODE_VOLUME_UP -> {
+                    val nextVol = (service.currentVolume.value + 5f).coerceAtMost(100f)
+                    service.setVolume(nextVol)
+                    return true
+                }
+                KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                    val nextVol = (service.currentVolume.value - 5f).coerceAtLeast(0f)
+                    service.setVolume(nextVol)
+                    return true
+                }
+            }
+        }
+        return super.onKeyDown(keyCode, event)
     }
 }

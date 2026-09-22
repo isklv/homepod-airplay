@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioManager
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.net.wifi.WifiManager
@@ -30,12 +31,16 @@ import com.homepod.airplay.protocol.RtpAudioSender
 import com.homepod.airplay.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.net.NetworkInterface
 
 class AirPlayAudioService : Service() {
@@ -66,14 +71,63 @@ class AirPlayAudioService : Service() {
     private val _currentVolume = MutableStateFlow(50f)
     val currentVolume: StateFlow<Float> = _currentVolume.asStateFlow()
 
+    private val _mutePhoneSpeaker = MutableStateFlow(true)
+    val mutePhoneSpeaker: StateFlow<Boolean> = _mutePhoneSpeaker.asStateFlow()
+    private var savedMediaVolume = -1
+    private var isPhoneSpeakerMuted = false
+
     private var rtspClient: RTSPClient? = null
     private var rtpSender: RtpAudioSender? = null
     private var audioCapture: AudioCaptureManager? = null
     private var testToneGenerator: TestToneGenerator? = null
     private var mediaProjection: MediaProjection? = null
+    private var keepAliveJob: Job? = null
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+
+    fun setMutePhoneSpeaker(enabled: Boolean) {
+        _mutePhoneSpeaker.value = enabled
+        if (_streamState.value is StreamState.Streaming) {
+            if (enabled) {
+                mutePhone()
+            } else {
+                restorePhoneVolume()
+            }
+        }
+    }
+
+    private fun mutePhone() {
+        if (isPhoneSpeakerMuted) return
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            if (current > 0) {
+                savedMediaVolume = current
+            }
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0)
+            isPhoneSpeakerMuted = true
+            Log.d(TAG, "Muted phone speaker (saved volume: $savedMediaVolume)")
+        } catch (e: Exception) {
+            Log.w(TAG, "Error muting phone speaker: ${e.message}")
+        }
+    }
+
+    private fun restorePhoneVolume() {
+        if (!isPhoneSpeakerMuted) return
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            if (savedMediaVolume >= 0) {
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, savedMediaVolume, 0)
+                Log.d(TAG, "Restored phone speaker volume to $savedMediaVolume")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error restoring phone speaker volume: ${e.message}")
+        } finally {
+            isPhoneSpeakerMuted = false
+            savedMediaVolume = -1
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -192,6 +246,12 @@ class AirPlayAudioService : Service() {
                 updateNotification("Streaming to ${device.name}")
                 Log.d(TAG, "Streaming to ${device.name} successfully established!")
 
+                if (sourceType == AudioSourceType.SYSTEM_CAPTURE && _mutePhoneSpeaker.value) {
+                    mutePhone()
+                }
+
+                startKeepAliveLoop()
+
             } catch (e: Exception) {
                 Log.e(TAG, "Streaming error: ${e.message}", e)
                 cleanup()
@@ -203,6 +263,31 @@ class AirPlayAudioService : Service() {
                 }
                 _streamState.value = StreamState.Error(userMsg)
                 stopForeground(STOP_FOREGROUND_REMOVE)
+            }
+        }
+    }
+
+    private fun startKeepAliveLoop() {
+        keepAliveJob?.cancel()
+        keepAliveJob = serviceScope.launch(Dispatchers.IO) {
+            Log.d(TAG, "Starting RTSP keep-alive loop (interval: 15s)")
+            while (isActive && _streamState.value is StreamState.Streaming) {
+                delay(15_000)
+                if (!isActive || _streamState.value !is StreamState.Streaming) break
+                val client = rtspClient
+                if (client == null) break
+
+                val ok = client.sendKeepAlive()
+                if (!ok) {
+                    Log.e(TAG, "RTSP keep-alive failed! Connection to HomePod lost.")
+                    withContext(Dispatchers.Main) {
+                        _streamState.value = StreamState.Error("Связь с HomePod потеряна (таймаут соединения)")
+                        stopStreaming()
+                    }
+                    break
+                } else {
+                    Log.d(TAG, "RTSP keep-alive OK")
+                }
             }
         }
     }
@@ -232,6 +317,11 @@ class AirPlayAudioService : Service() {
     }
 
     private fun cleanup() {
+        keepAliveJob?.cancel()
+        keepAliveJob = null
+
+        restorePhoneVolume()
+
         audioCapture?.stop()
         audioCapture = null
 
@@ -321,7 +411,12 @@ class AirPlayAudioService : Service() {
 
         try {
             val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "HomePodAirPlay:WifiLock").apply {
+            val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = wifiManager.createWifiLock(lockMode, "HomePodAirPlay:WifiLock").apply {
                 acquire()
             }
         } catch (e: Exception) {
