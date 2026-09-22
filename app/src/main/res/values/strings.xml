@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">HomePod Streamer</string>
+    <string name="service_name">HomePod AirPlay Audio Service</string>
+    <string name="notification_channel_name">AirPlay Stream</string>
+    <string name="notification_channel_desc">Active audio streaming to HomePod</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_scanning">Searching for HomePod…</string>
+    <string name="status_connecting">Connecting to %s…</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_streaming">Streaming to %s</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_disconnect">Disconnect</string>
+</resources>

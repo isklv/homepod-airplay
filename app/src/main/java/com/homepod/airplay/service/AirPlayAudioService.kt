@@ -1,0 +1,345 @@
+package com.homepod.airplay.service
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.net.wifi.WifiManager
+import android.os.Binder
+import android.os.Build
+import android.os.IBinder
+import android.os.PowerManager
+import android.util.Log
+import androidx.core.app.NotificationCompat
+import com.homepod.airplay.R
+import com.homepod.airplay.audio.AudioCaptureManager
+import com.homepod.airplay.audio.TestToneGenerator
+import com.homepod.airplay.crypto.AirPlayCrypto
+import com.homepod.airplay.data.model.AirPlayDevice
+import com.homepod.airplay.data.model.AudioSourceType
+import com.homepod.airplay.data.model.StreamState
+import com.homepod.airplay.protocol.RTSPClient
+import com.homepod.airplay.protocol.RtpAudioSender
+import com.homepod.airplay.ui.MainActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import java.net.NetworkInterface
+
+class AirPlayAudioService : Service() {
+
+    companion object {
+        private const val TAG = "AirPlayAudioService"
+        private const val NOTIFICATION_CHANNEL_ID = "airplay_stream_channel"
+        private const val NOTIFICATION_ID = 1001
+
+        const val ACTION_STOP_STREAM = "com.homepod.airplay.action.STOP"
+    }
+
+    inner class LocalBinder : Binder() {
+        val service: AirPlayAudioService get() = this@AirPlayAudioService
+    }
+
+    private val binder = LocalBinder()
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    private val _streamState = MutableStateFlow<StreamState>(StreamState.Disconnected)
+    val streamState: StateFlow<StreamState> = _streamState.asStateFlow()
+
+    private val _currentVolume = MutableStateFlow(50f)
+    val currentVolume: StateFlow<Float> = _currentVolume.asStateFlow()
+
+    private var rtspClient: RTSPClient? = null
+    private var rtpSender: RtpAudioSender? = null
+    private var audioCapture: AudioCaptureManager? = null
+    private var testToneGenerator: TestToneGenerator? = null
+    private var mediaProjection: MediaProjection? = null
+
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        createNotificationChannel()
+        acquireLocks()
+    }
+
+    override fun onBind(intent: Intent?): IBinder = binder
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP_STREAM) {
+            stopStreaming()
+        }
+        return START_NOT_STICKY
+    }
+
+    fun startStreaming(
+        device: AirPlayDevice,
+        sourceType: AudioSourceType,
+        resultCode: Int = 0,
+        projectionData: Intent? = null
+    ) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                _streamState.value = StreamState.Connecting(device)
+                updateNotification("Connecting to ${device.name}…")
+
+                // Step 1: Create RTSP connection
+                val client = RTSPClient(device.ip, device.port)
+                rtspClient = client
+                client.connect(timeoutMs = 5000)
+
+                // Step 2: Send OPTIONS
+                if (!client.sendOptions()) {
+                    throw IllegalStateException("OPTIONS handshake failed")
+                }
+
+                // Step 3: Prepare cryptographic keys
+                val aesKey = AirPlayCrypto.generateRandomBytes(16)
+                val aesIv = AirPlayCrypto.generateRandomBytes(16)
+                val localIp = getLocalIpAddress() ?: "0.0.0.0"
+
+                // Step 4: Send ANNOUNCE
+                if (!client.sendAnnounce(localIp, aesKey, aesIv)) {
+                    throw IllegalStateException("ANNOUNCE handshake failed")
+                }
+
+                // Step 5: Initialize RTP Sender sockets and send SETUP
+                val sender = RtpAudioSender(
+                    targetIp = device.ip,
+                    serverPort = 0, // will be updated from SETUP response
+                    controlPort = 0,
+                    timingPort = 0,
+                    aesKey = aesKey,
+                    aesIv = aesIv
+                )
+
+                val setupResult = client.sendSetup(
+                    localControlPort = sender.localControlPort,
+                    localTimingPort = sender.localTimingPort
+                )
+
+                // Recreate or configure sender with negotiated remote ports
+                sender.stop()
+                val configuredSender = RtpAudioSender(
+                    targetIp = device.ip,
+                    serverPort = setupResult.serverPort,
+                    controlPort = setupResult.controlPort,
+                    timingPort = setupResult.timingPort,
+                    aesKey = aesKey,
+                    aesIv = aesIv
+                )
+                rtpSender = configuredSender
+                configuredSender.start(serviceScope)
+
+                // Step 6: Send RECORD
+                if (!client.sendRecord(startSeq = 0, startRtpTime = 0)) {
+                    throw IllegalStateException("RECORD request failed")
+                }
+
+                // Step 7: Set initial volume
+                client.sendVolume(_currentVolume.value)
+
+                // Step 8: Start Audio Source (System Audio Capture or Test Tone)
+                if (sourceType == AudioSourceType.SYSTEM_CAPTURE && projectionData != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                        val projection = projectionManager.getMediaProjection(resultCode, projectionData)
+                        mediaProjection = projection
+
+                        val capture = AudioCaptureManager(projection) { buffer, length ->
+                            configuredSender.queueAudio(buffer, length)
+                        }
+                        audioCapture = capture
+                        capture.start(serviceScope)
+                    } else {
+                        throw IllegalStateException("System audio capture requires Android 10+")
+                    }
+                } else {
+                    // Test tone mode
+                    val toneGen = TestToneGenerator { buffer, length ->
+                        configuredSender.queueAudio(buffer, length)
+                    }
+                    testToneGenerator = toneGen
+                    toneGen.start(serviceScope)
+                }
+
+                _streamState.value = StreamState.Streaming(device, sourceType)
+                startForegroundWithNotification(device)
+                Log.d(TAG, "Streaming to ${device.name} successfully established!")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Streaming error: ${e.message}", e)
+                cleanup()
+                _streamState.value = StreamState.Error(e.message ?: "Failed to connect to ${device.name}")
+            }
+        }
+    }
+
+    fun setVolume(percent: Float) {
+        val clamped = percent.coerceIn(0f, 100f)
+        _currentVolume.value = clamped
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                rtspClient?.sendVolume(clamped)
+            } catch (e: Exception) {
+                Log.w(TAG, "Error updating volume: ${e.message}")
+            }
+        }
+    }
+
+    fun stopStreaming() {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                rtspClient?.sendTeardown()
+            } catch (_: Exception) {}
+            cleanup()
+            _streamState.value = StreamState.Disconnected
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+    }
+
+    private fun cleanup() {
+        audioCapture?.stop()
+        audioCapture = null
+
+        testToneGenerator?.stop()
+        testToneGenerator = null
+
+        mediaProjection?.stop()
+        mediaProjection = null
+
+        rtpSender?.stop()
+        rtpSender = null
+
+        rtspClient?.close()
+        rtspClient = null
+    }
+
+    private fun startForegroundWithNotification(device: AirPlayDevice) {
+        val notification = buildNotification("Streaming to ${device.name}")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            }
+            startForeground(NOTIFICATION_ID, notification, type)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun updateNotification(content: String) {
+        val notification = buildNotification(content)
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(NOTIFICATION_ID, notification)
+    }
+
+    private fun buildNotification(contentText: String): Notification {
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val stopIntent = PendingIntent.getService(
+            this,
+            1,
+            Intent(this, AirPlayAudioService::class.java).apply { action = ACTION_STOP_STREAM },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setContentTitle("HomePod AirPlay")
+            .setContentText(contentText)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentIntent(pendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopIntent)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                NOTIFICATION_CHANNEL_ID,
+                "HomePod AirPlay Stream",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Shows active AirPlay streaming notification"
+            }
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(channel)
+        }
+    }
+
+    private fun acquireLocks() {
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "HomePodAirPlay:WakeLock").apply {
+                acquire(24 * 60 * 60 * 1000L) // 24 hours max
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error acquiring wake lock: ${e.message}")
+        }
+
+        try {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "HomePodAirPlay:WifiLock").apply {
+                acquire()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error acquiring wifi lock: ${e.message}")
+        }
+    }
+
+    private fun releaseLocks() {
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        } catch (_: Exception) {}
+        try {
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        } catch (_: Exception) {}
+    }
+
+    private fun getLocalIpAddress(): String? {
+        try {
+            val interfaces = NetworkInterface.getNetworkInterfaces()
+            while (interfaces.hasMoreElements()) {
+                val intf = interfaces.nextElement()
+                if (intf.isLoopback || !intf.isUp) continue
+                val addrs = intf.inetAddresses
+                while (addrs.hasMoreElements()) {
+                    val addr = addrs.nextElement()
+                    if (!addr.isLoopbackAddress && addr.hostAddress?.contains(":") == false) {
+                        return addr.hostAddress
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return null
+    }
+
+    override fun onDestroy() {
+        cleanup()
+        releaseLocks()
+        serviceScope.cancel()
+        super.onDestroy()
+    }
+}

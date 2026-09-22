@@ -1,0 +1,176 @@
+package com.homepod.airplay.ui
+
+import android.Manifest
+import android.app.Activity
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.os.Bundle
+import android.os.IBinder
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
+import com.homepod.airplay.data.model.AirPlayDevice
+import com.homepod.airplay.data.model.AudioSourceType
+import com.homepod.airplay.data.model.StreamState
+import com.homepod.airplay.discovery.AirPlayDiscovery
+import com.homepod.airplay.service.AirPlayAudioService
+import com.homepod.airplay.ui.screens.HomeScreen
+import com.homepod.airplay.ui.theme.HomePodAirPlayTheme
+
+class MainActivity : ComponentActivity() {
+
+    private var audioService by mutableStateOf<AirPlayAudioService?>(null)
+    private var isBound = false
+
+    private lateinit var airPlayDiscovery: AirPlayDiscovery
+
+    private var pendingDeviceToConnect: AirPlayDevice? = null
+    private var selectedSourceType by mutableStateOf(AudioSourceType.SYSTEM_CAPTURE)
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as AirPlayAudioService.LocalBinder
+            audioService = binder.service
+            isBound = true
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            audioService = null
+            isBound = false
+        }
+    }
+
+    // Permission launcher for Record Audio & Post Notifications
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val recordAudioGranted = permissions[Manifest.permission.RECORD_AUDIO] ?: false
+        if (!recordAudioGranted) {
+            Toast.makeText(this, "Audio recording permission is required to capture system audio", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // MediaProjection launcher for AudioPlaybackCapture
+    private val mediaProjectionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            val device = pendingDeviceToConnect
+            if (device != null) {
+                startServiceStreaming(device, selectedSourceType, result.resultCode, result.data)
+            }
+        } else {
+            Toast.makeText(this, "System audio capture was not allowed", Toast.LENGTH_SHORT).show()
+        }
+        pendingDeviceToConnect = null
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        airPlayDiscovery = AirPlayDiscovery(this)
+
+        checkAndRequestPermissions()
+
+        val serviceIntent = Intent(this, AirPlayAudioService::class.java)
+        startService(serviceIntent)
+        bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
+
+        setContent {
+            HomePodAirPlayTheme {
+                val streamState by (audioService?.streamState ?: kotlinx.coroutines.flow.emptyFlow())
+                    .collectAsState(initial = StreamState.Disconnected)
+
+                val discoveredDevices by airPlayDiscovery.discoveredDevices.collectAsState()
+                val isScanning by airPlayDiscovery.isScanning.collectAsState()
+                val currentVolume by (audioService?.currentVolume ?: kotlinx.coroutines.flow.emptyFlow())
+                    .collectAsState(initial = 50f)
+
+                HomeScreen(
+                    streamState = streamState,
+                    discoveredDevices = discoveredDevices,
+                    isScanning = isScanning,
+                    currentVolume = currentVolume,
+                    selectedSource = selectedSourceType,
+                    onSourceSelected = { selectedSourceType = it },
+                    onRefreshScan = { airPlayDiscovery.startDiscovery() },
+                    onConnectDevice = { device -> handleConnectDevice(device) },
+                    onStopStreaming = { audioService?.stopStreaming() },
+                    onVolumeChanged = { newVolume -> audioService?.setVolume(newVolume) },
+                    onAddManualDevice = { name, ip, port -> airPlayDiscovery.addManualDevice(name, ip, port) }
+                )
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        airPlayDiscovery.startDiscovery()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        airPlayDiscovery.stopDiscovery()
+    }
+
+    override fun onDestroy() {
+        if (isBound) {
+            unbindService(serviceConnection)
+            isBound = false
+        }
+        super.onDestroy()
+    }
+
+    private fun handleConnectDevice(device: AirPlayDevice) {
+        if (selectedSourceType == AudioSourceType.SYSTEM_CAPTURE) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                pendingDeviceToConnect = device
+                val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                mediaProjectionLauncher.launch(projectionManager.createScreenCaptureIntent())
+            } else {
+                Toast.makeText(this, "System audio capture requires Android 10+", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            // Test tone mode (no screen/audio projection needed)
+            startServiceStreaming(device, AudioSourceType.TEST_TONE, 0, null)
+        }
+    }
+
+    private fun startServiceStreaming(
+        device: AirPlayDevice,
+        sourceType: AudioSourceType,
+        resultCode: Int,
+        projectionData: Intent?
+    ) {
+        val serviceIntent = Intent(this, AirPlayAudioService::class.java)
+        ContextCompat.startForegroundService(this, serviceIntent)
+        audioService?.startStreaming(device, sourceType, resultCode, projectionData)
+    }
+
+    private fun checkAndRequestPermissions() {
+        val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        val needsRequest = permissions.any {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        if (needsRequest) {
+            permissionLauncher.launch(permissions.toTypedArray())
+        }
+    }
+}
