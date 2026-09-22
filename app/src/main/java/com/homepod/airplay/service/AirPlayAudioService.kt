@@ -56,6 +56,7 @@ class AirPlayAudioService : Service() {
         const val EXTRA_PORT = "extra_port"
         const val EXTRA_NAME = "extra_name"
         const val EXTRA_IS_TONE = "extra_is_tone"
+        const val EXTRA_LATENCY_MS = "extra_latency_ms"
     }
 
     inner class LocalBinder : Binder() {
@@ -71,10 +72,26 @@ class AirPlayAudioService : Service() {
     private val _currentVolume = MutableStateFlow(50f)
     val currentVolume: StateFlow<Float> = _currentVolume.asStateFlow()
 
+    private val _latencyMs = MutableStateFlow(1000)
+    val latencyMs: StateFlow<Int> = _latencyMs.asStateFlow()
+
     private val _mutePhoneSpeaker = MutableStateFlow(true)
     val mutePhoneSpeaker: StateFlow<Boolean> = _mutePhoneSpeaker.asStateFlow()
     private var savedMediaVolume = -1
     private var isPhoneSpeakerMuted = false
+
+    fun setLatencyMs(ms: Int) {
+        val clamped = ms.coerceIn(200, 3000)
+        _latencyMs.value = clamped
+        rtpSender?.latencyMs = clamped
+        try {
+            getSharedPreferences("homepod_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putInt("latency_ms", clamped)
+                .apply()
+        } catch (_: Exception) {}
+        Log.d(TAG, "Latency set to ${clamped}ms")
+    }
 
     private var rtspClient: RTSPClient? = null
     private var rtpSender: RtpAudioSender? = null
@@ -88,6 +105,12 @@ class AirPlayAudioService : Service() {
 
     fun setMutePhoneSpeaker(enabled: Boolean) {
         _mutePhoneSpeaker.value = enabled
+        try {
+            getSharedPreferences("homepod_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean("mute_phone_speaker", enabled)
+                .apply()
+        } catch (_: Exception) {}
         if (_streamState.value is StreamState.Streaming) {
             if (enabled) {
                 mutePhone()
@@ -131,6 +154,9 @@ class AirPlayAudioService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        val prefs = getSharedPreferences("homepod_prefs", Context.MODE_PRIVATE)
+        _latencyMs.value = prefs.getInt("latency_ms", 500)
+        _mutePhoneSpeaker.value = prefs.getBoolean("mute_phone_speaker", true)
         createNotificationChannel()
         acquireLocks()
     }
@@ -146,6 +172,8 @@ class AirPlayAudioService : Service() {
                     val port = intent.getIntExtra(EXTRA_PORT, 5000)
                     val name = intent.getStringExtra(EXTRA_NAME) ?: "HomePod"
                     val isTone = intent.getBooleanExtra(EXTRA_IS_TONE, true)
+                    val latency = intent.getIntExtra(EXTRA_LATENCY_MS, _latencyMs.value)
+                    _latencyMs.value = latency
                     val device = AirPlayDevice(
                         id = name,
                         name = name,
@@ -178,12 +206,12 @@ class AirPlayAudioService : Service() {
             try {
                 // Step 0: Get Wi-Fi network to bypass active VPN if needed
                 val wifiNetwork = NetworkUtils.getWifiNetwork(this@AirPlayAudioService)
-                Log.d(TAG, "Wi-Fi network bound for AirPlay: $wifiNetwork")
+                Log.d(TAG, "Wi-Fi network bound for AirPlay: $wifiNetwork, latency: ${_latencyMs.value}ms")
                 NetworkUtils.bindProcessToWifi(this@AirPlayAudioService)
 
                 // Step 1: Initialize RTP Sender and start timing listener BEFORE sending SETUP
                 // HomePod pings timing_port during SETUP to verify the client!
-                val sender = RtpAudioSender(device.ip, network = wifiNetwork)
+                val sender = RtpAudioSender(device.ip, network = wifiNetwork, latencyMs = _latencyMs.value)
                 rtpSender = sender
                 sender.startTimingListener(serviceScope)
 

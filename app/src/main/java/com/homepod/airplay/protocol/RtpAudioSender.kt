@@ -20,7 +20,8 @@ class RtpAudioSender(
     private val targetIp: String,
     private val aesKey: ByteArray? = null,
     private val aesIv: ByteArray? = null,
-    private val network: android.net.Network? = null
+    private val network: android.net.Network? = null,
+    @Volatile var latencyMs: Int = 1000
 ) {
     companion object {
         private const val TAG = "RtpAudioSender"
@@ -234,9 +235,10 @@ class RtpAudioSender(
             // Initial sync packet
             sendSyncPacket(destAddress, isFirst = true)
 
-            // Pre-buffer a few chunks (e.g. 12 chunks ~ 96ms) to avoid queue underrun at start
+            // Pre-buffer a few chunks adaptively based on latency setting (e.g. 4..12 chunks)
+            val prebufferTarget = (latencyMs / 80).coerceIn(4, 12)
             var prebufferWait = 0
-            while (isActive && isStreaming && audioQueue.size < 12 && prebufferWait < 40) {
+            while (isActive && isStreaming && audioQueue.size < prebufferTarget && prebufferWait < 40) {
                 kotlinx.coroutines.delay(10)
                 prebufferWait++
             }
@@ -347,8 +349,8 @@ class RtpAudioSender(
             bb.put(0xD4.toByte()) // m=1, PT=84
             bb.putShort(7)
 
-            val latency = 66150 // 1500 ms at 44100 Hz (matching PipeWire DEFAULT_LATENCY_MS 1500)
-            val currentRtp = (rtpTimestamp - latency).toInt()
+            val latencyFrames = (44100L * latencyMs / 1000L).toInt()
+            val currentRtp = (rtpTimestamp - latencyFrames).toInt()
             bb.putInt(currentRtp)
 
             val ntp = getNtpTimestamp()

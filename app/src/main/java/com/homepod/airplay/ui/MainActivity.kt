@@ -106,6 +106,8 @@ class MainActivity : ComponentActivity() {
                     .collectAsState(initial = 50f)
                 val mutePhoneSpeaker by (audioService?.mutePhoneSpeaker ?: kotlinx.coroutines.flow.emptyFlow())
                     .collectAsState(initial = true)
+                val latencyMs by (audioService?.latencyMs ?: kotlinx.coroutines.flow.emptyFlow())
+                    .collectAsState(initial = 500)
 
                 HomeScreen(
                     streamState = streamState,
@@ -113,8 +115,10 @@ class MainActivity : ComponentActivity() {
                     isScanning = isScanning,
                     currentVolume = currentVolume,
                     selectedSource = selectedSourceType,
+                    selectedLatencyMs = latencyMs,
                     mutePhoneSpeaker = mutePhoneSpeaker,
                     onToggleMutePhoneSpeaker = { audioService?.setMutePhoneSpeaker(it) },
+                    onLatencySelected = { audioService?.setLatencyMs(it) },
                     onSourceSelected = { selectedSourceType = it },
                     onRefreshScan = { airPlayDiscovery.startDiscovery() },
                     onConnectDevice = { device -> handleConnectDevice(device) },

@@ -86,8 +86,10 @@ fun HomeScreen(
     isScanning: Boolean,
     currentVolume: Float,
     selectedSource: AudioSourceType,
+    selectedLatencyMs: Int = 500,
     mutePhoneSpeaker: Boolean = true,
     onToggleMutePhoneSpeaker: (Boolean) -> Unit = {},
+    onLatencySelected: (Int) -> Unit = {},
     onSourceSelected: (AudioSourceType) -> Unit,
     onRefreshScan: () -> Unit,
     onConnectDevice: (AirPlayDevice) -> Unit,
@@ -152,8 +154,10 @@ fun HomeScreen(
                     streamState = streamState,
                     currentVolume = currentVolume,
                     selectedSource = selectedSource,
+                    selectedLatencyMs = selectedLatencyMs,
                     mutePhoneSpeaker = mutePhoneSpeaker,
                     onToggleMutePhoneSpeaker = onToggleMutePhoneSpeaker,
+                    onLatencySelected = onLatencySelected,
                     onSourceSelected = onSourceSelected,
                     onStopStreaming = onStopStreaming,
                     onVolumeChanged = onVolumeChanged
@@ -372,8 +376,10 @@ fun ActiveStreamingCard(
     streamState: StreamState,
     currentVolume: Float,
     selectedSource: AudioSourceType,
+    selectedLatencyMs: Int = 500,
     mutePhoneSpeaker: Boolean,
     onToggleMutePhoneSpeaker: (Boolean) -> Unit,
+    onLatencySelected: (Int) -> Unit = {},
     onSourceSelected: (AudioSourceType) -> Unit,
     onStopStreaming: () -> Unit,
     onVolumeChanged: (Float) -> Unit
@@ -520,12 +526,12 @@ fun ActiveStreamingCard(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                "Заглушить динамик телефона",
+                                "Заглушить динамик телефона/ТВ",
                                 fontWeight = FontWeight.SemiBold,
                                 fontSize = 13.sp
                             )
                             Text(
-                                "Звук пойдет только на HomePod (динамики телефона не будут играть)",
+                                "Звук пойдет только на HomePod (динамики устройства не будут играть)",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -534,6 +540,42 @@ fun ActiveStreamingCard(
                         androidx.compose.material3.Switch(
                             checked = mutePhoneSpeaker,
                             onCheckedChange = onToggleMutePhoneSpeaker
+                        )
+                    }
+                }
+
+                // Latency / Delay Selector
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    "Задержка AirPlay (Буфер воспроизведения):",
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    val presets = listOf(
+                        250 to "250 мс\nТВ / Видео",
+                        500 to "500 мс\nОптимально",
+                        1000 to "1.0 сек\nБаланс",
+                        1500 to "1.5 сек\nМузыка"
+                    )
+                    presets.forEach { (ms, label) ->
+                        FilterChip(
+                            selected = selectedLatencyMs == ms,
+                            onClick = { onLatencySelected(ms) },
+                            label = {
+                                Text(
+                                    text = label,
+                                    fontSize = 11.sp,
+                                    lineHeight = 13.sp,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                            },
+                            modifier = Modifier.weight(1f)
                         )
                     }
                 }
@@ -748,6 +790,11 @@ fun HomePodGuideDialog(onDismiss: () -> Unit) {
                     "• Если у вас активен VPN (Amnezia, WireGuard и др.): добавьте «HomePod Streamer» в исключения VPN (Раздельное туннелирование) или отключите VPN во время трансляции.",
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    "• Android TV: приложение полностью поддерживает приставки на Android 10+. В видеоплеерах (SmartTube, VLC, Kodi, Nova) можно выставить смещение звука (Audio Delay) под выбранную задержку буфера для идеальной синхронизации видео и губ (0 мс рассинхрона).",
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
