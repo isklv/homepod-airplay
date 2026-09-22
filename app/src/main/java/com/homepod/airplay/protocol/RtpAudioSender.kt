@@ -19,7 +19,8 @@ import javax.crypto.Cipher
 class RtpAudioSender(
     private val targetIp: String,
     private val aesKey: ByteArray? = null,
-    private val aesIv: ByteArray? = null
+    private val aesIv: ByteArray? = null,
+    private val network: android.net.Network? = null
 ) {
     companion object {
         private const val TAG = "RtpAudioSender"
@@ -72,8 +73,11 @@ class RtpAudioSender(
 
     init {
         controlSocket = DatagramSocket()
+        network?.let { NetworkUtils.bindSocketToWifi(it, controlSocket) }
         timingSocket = DatagramSocket()
+        network?.let { NetworkUtils.bindSocketToWifi(it, timingSocket) }
         audioSocket = DatagramSocket()
+        network?.let { NetworkUtils.bindSocketToWifi(it, audioSocket) }
     }
 
     /**

@@ -32,7 +32,10 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Speaker
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.ui.platform.LocalContext
+import com.homepod.airplay.protocol.NetworkUtils
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -92,6 +95,8 @@ fun HomeScreen(
 ) {
     var showManualDialog by remember { mutableStateOf(false) }
     var showGuideDialog by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val isVpnActive = remember(streamState) { NetworkUtils.isVpnActive(context) }
 
     Scaffold(
         topBar = {
@@ -149,6 +154,38 @@ fun HomeScreen(
                     onStopStreaming = onStopStreaming,
                     onVolumeChanged = onVolumeChanged
                 )
+            }
+
+            // VPN Warning Banner
+            if (isVpnActive) {
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = WarningOrange.copy(alpha = 0.18f)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Warning, contentDescription = null, tint = WarningOrange)
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "Включён VPN (блокирует локальную сеть)",
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    fontSize = 14.sp
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Добавьте «HomePod Streamer» в исключения вашего VPN (Раздельное туннелирование / Split Tunneling) или отключите VPN на время стриминга.",
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             // Error Banner if any
@@ -668,6 +705,12 @@ fun HomePodGuideDialog(onDismiss: () -> Unit) {
                 Text(
                     "• When you click Stream, Android will ask for permission to capture audio (standard dialog for casting).",
                     style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    "• Если у вас активен VPN (Amnezia, WireGuard и др.): добавьте «HomePod Streamer» в исключения VPN (Раздельное туннелирование) или отключите VPN во время трансляции.",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }

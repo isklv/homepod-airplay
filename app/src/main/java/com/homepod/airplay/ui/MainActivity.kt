@@ -39,11 +39,17 @@ class MainActivity : ComponentActivity() {
     private var pendingDeviceToConnect: AirPlayDevice? = null
     private var selectedSourceType by mutableStateOf(AudioSourceType.SYSTEM_CAPTURE)
 
+    private var pendingConnectIntent: Intent? = null
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val binder = service as AirPlayAudioService.LocalBinder
             audioService = binder.service
             isBound = true
+            pendingConnectIntent?.let {
+                handleIncomingIntent(it)
+                pendingConnectIntent = null
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -112,6 +118,39 @@ class MainActivity : ComponentActivity() {
                     onAddManualDevice = { name, ip, port -> airPlayDiscovery.addManualDevice(name, ip, port) }
                 )
             }
+        }
+
+        handleIncomingIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        if (intent == null) return
+        if (intent.action == AirPlayAudioService.ACTION_START_STREAM) {
+            val service = audioService
+            if (!isBound || service == null) {
+                pendingConnectIntent = intent
+                return
+            }
+            val ip = intent.getStringExtra(AirPlayAudioService.EXTRA_IP) ?: return
+            val port = intent.getIntExtra(AirPlayAudioService.EXTRA_PORT, 5000)
+            val name = intent.getStringExtra(AirPlayAudioService.EXTRA_NAME) ?: "HomePod"
+            val isTone = intent.getBooleanExtra(AirPlayAudioService.EXTRA_IS_TONE, true)
+            selectedSourceType = if (isTone) AudioSourceType.TEST_TONE else AudioSourceType.SYSTEM_CAPTURE
+            val device = AirPlayDevice(
+                id = name,
+                name = name,
+                ip = ip,
+                port = port,
+                model = "HomePod",
+                isHomePod = true
+            )
+            handleConnectDevice(device)
         }
     }
 

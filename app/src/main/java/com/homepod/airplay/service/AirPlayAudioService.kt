@@ -24,6 +24,7 @@ import com.homepod.airplay.crypto.AirPlayCrypto
 import com.homepod.airplay.data.model.AirPlayDevice
 import com.homepod.airplay.data.model.AudioSourceType
 import com.homepod.airplay.data.model.StreamState
+import com.homepod.airplay.protocol.NetworkUtils
 import com.homepod.airplay.protocol.RTSPClient
 import com.homepod.airplay.protocol.RtpAudioSender
 import com.homepod.airplay.ui.MainActivity
@@ -45,6 +46,11 @@ class AirPlayAudioService : Service() {
         private const val NOTIFICATION_ID = 1001
 
         const val ACTION_STOP_STREAM = "com.homepod.airplay.action.STOP"
+        const val ACTION_START_STREAM = "com.homepod.airplay.action.START"
+        const val EXTRA_IP = "extra_ip"
+        const val EXTRA_PORT = "extra_port"
+        const val EXTRA_NAME = "extra_name"
+        const val EXTRA_IS_TONE = "extra_is_tone"
     }
 
     inner class LocalBinder : Binder() {
@@ -78,8 +84,28 @@ class AirPlayAudioService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP_STREAM) {
-            stopStreaming()
+        when (intent?.action) {
+            ACTION_STOP_STREAM -> stopStreaming()
+            ACTION_START_STREAM -> {
+                val ip = intent.getStringExtra(EXTRA_IP)
+                if (ip != null) {
+                    val port = intent.getIntExtra(EXTRA_PORT, 5000)
+                    val name = intent.getStringExtra(EXTRA_NAME) ?: "HomePod"
+                    val isTone = intent.getBooleanExtra(EXTRA_IS_TONE, true)
+                    val device = AirPlayDevice(
+                        id = name,
+                        name = name,
+                        ip = ip,
+                        port = port,
+                        model = "HomePod",
+                        isHomePod = true
+                    )
+                    startStreaming(
+                        device = device,
+                        sourceType = if (isTone) AudioSourceType.TEST_TONE else AudioSourceType.SYSTEM_CAPTURE
+                    )
+                }
+            }
         }
         return START_NOT_STICKY
     }
@@ -96,14 +122,19 @@ class AirPlayAudioService : Service() {
 
         serviceScope.launch(Dispatchers.IO) {
             try {
+                // Step 0: Get Wi-Fi network to bypass active VPN if needed
+                val wifiNetwork = NetworkUtils.getWifiNetwork(this@AirPlayAudioService)
+                Log.d(TAG, "Wi-Fi network bound for AirPlay: $wifiNetwork")
+                NetworkUtils.bindProcessToWifi(this@AirPlayAudioService)
+
                 // Step 1: Initialize RTP Sender and start timing listener BEFORE sending SETUP
                 // HomePod pings timing_port during SETUP to verify the client!
-                val sender = RtpAudioSender(device.ip)
+                val sender = RtpAudioSender(device.ip, network = wifiNetwork)
                 rtpSender = sender
                 sender.startTimingListener(serviceScope)
 
                 // Step 2: Connect RTSP socket
-                val client = RTSPClient(device.ip, device.port)
+                val client = RTSPClient(device.ip, device.port, network = wifiNetwork)
                 rtspClient = client
                 client.connect(timeoutMs = 5000)
 
@@ -164,7 +195,13 @@ class AirPlayAudioService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "Streaming error: ${e.message}", e)
                 cleanup()
-                _streamState.value = StreamState.Error(e.message ?: "Failed to connect to ${device.name}")
+                val isVpn = NetworkUtils.isVpnActive(this@AirPlayAudioService)
+                val userMsg = if (isVpn && (e is java.net.SocketTimeoutException || e is java.net.SocketException || e.message?.contains("10.8.") == true || e.message?.contains("EPERM") == true)) {
+                    "Блокировка VPN: на телефоне активен VPN, который блокирует доступ к локальной сети (${device.ip}). Добавьте HomePod Streamer в исключения VPN (Раздельное туннелирование) или временно отключите VPN."
+                } else {
+                    e.message ?: "Не удалось подключиться к ${device.name}"
+                }
+                _streamState.value = StreamState.Error(userMsg)
                 stopForeground(STOP_FOREGROUND_REMOVE)
             }
         }

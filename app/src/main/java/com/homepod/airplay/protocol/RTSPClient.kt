@@ -13,7 +13,8 @@ import java.util.Locale
 
 class RTSPClient(
     val host: String,
-    val port: Int = 5000
+    val port: Int = 5000,
+    val network: android.net.Network? = null
 ) {
     companion object {
         private const val TAG = "RTSPClient"
@@ -55,7 +56,18 @@ class RTSPClient(
 
     suspend fun connect(timeoutMs: Int = 5000) = withContext(Dispatchers.IO) {
         Log.d(TAG, "Connecting RTSP socket to $host:$port...")
-        val s = Socket()
+        val s = if (network != null) {
+            try {
+                network.socketFactory.createSocket().also {
+                    Log.d(TAG, "Created socket via Network.socketFactory")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "SocketFactory failed, falling back to manual bind: ${e.message}")
+                Socket().also { NetworkUtils.bindSocketToWifi(network, it) }
+            }
+        } else {
+            Socket()
+        }
         s.connect(InetSocketAddress(host, port), timeoutMs)
         s.soTimeout = timeoutMs
         socket = s
