@@ -25,8 +25,15 @@ class RTSPClient(
     private var reader: BufferedReader? = null
 
     private var cSeq = 1
-    var sessionId: String? = null
+    var localIp: String = "0.0.0.0"
         private set
+    var sessionId: String = generateNumericSessionId()
+        private set
+    var serverSessionId: String? = null
+        private set
+
+    val baseUrl: String
+        get() = "rtsp://$localIp/$sessionId"
 
     private val clientInstance = generateHexId()
     private val dacpId = generateHexId()
@@ -42,15 +49,20 @@ class RTSPClient(
         return bytes.joinToString("") { "%02X".format(it) }
     }
 
+    private fun generateNumericSessionId(): String {
+        return (10000000..99999999).random().toString()
+    }
+
     suspend fun connect(timeoutMs: Int = 5000) = withContext(Dispatchers.IO) {
         Log.d(TAG, "Connecting RTSP socket to $host:$port...")
         val s = Socket()
         s.connect(InetSocketAddress(host, port), timeoutMs)
         s.soTimeout = timeoutMs
         socket = s
+        localIp = s.localAddress?.hostAddress ?: "0.0.0.0"
         writer = s.getOutputStream()
         reader = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.ISO_8859_1))
-        Log.d(TAG, "RTSP socket connected successfully.")
+        Log.d(TAG, "RTSP connected. localIp=$localIp, baseUrl=$baseUrl")
     }
 
     suspend fun sendOptions(): Boolean = withContext(Dispatchers.IO) {
@@ -67,36 +79,33 @@ class RTSPClient(
     }
 
     suspend fun sendAnnounce(
-        localIp: String,
-        aesKey: ByteArray,
-        aesIv: ByteArray
+        encrypted: Boolean = false,
+        aesKey: ByteArray? = null,
+        aesIv: ByteArray? = null
     ): Boolean = withContext(Dispatchers.IO) {
-        val encryptedKey = AirPlayCrypto.encryptAesKey(aesKey)
-        val rsaAesKeyB64 = AirPlayCrypto.toBase64(encryptedKey)
-        val aesIvB64 = AirPlayCrypto.toBase64(aesIv)
-
-        val challenge = AirPlayCrypto.generateRandomBytes(16)
-        val challengeB64 = AirPlayCrypto.toBase64(challenge)
-
         val sdp = buildString {
             append("v=0\r\n")
-            append("o=iTunes 0 0 IN IP4 $localIp\r\n")
+            append("o=iTunes $sessionId 0 IN IP4 $localIp\r\n")
             append("s=iTunes\r\n")
             append("c=IN IP4 $host\r\n")
             append("t=0 0\r\n")
             append("m=audio 0 RTP/AVP 96\r\n")
             append("a=rtpmap:96 AppleLossless\r\n")
             append("a=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n")
-            append("a=rsaaeskey:$rsaAesKeyB64\r\n")
-            append("a=aesiv:$aesIvB64\r\n")
+            if (encrypted && aesKey != null && aesIv != null) {
+                val encryptedKey = AirPlayCrypto.encryptAesKey(aesKey)
+                val rsaAesKeyB64 = AirPlayCrypto.toBase64(encryptedKey)
+                val aesIvB64 = AirPlayCrypto.toBase64(aesIv)
+                append("a=rsaaeskey:$rsaAesKeyB64\r\n")
+                append("a=aesiv:$aesIvB64\r\n")
+            }
         }
 
         val request = buildString {
-            append("ANNOUNCE rtsp://$host/stream RTSP/1.0\r\n")
+            append("ANNOUNCE $baseUrl RTSP/1.0\r\n")
             append("CSeq: ${cSeq++}\r\n")
             append("Content-Type: application/sdp\r\n")
             append("Content-Length: ${sdp.toByteArray(Charsets.UTF_8).size}\r\n")
-            append("Apple-Challenge: $challengeB64\r\n")
             append("User-Agent: $USER_AGENT\r\n")
             append("Client-Instance: $clientInstance\r\n")
             append("DACP-ID: $dacpId\r\n")
@@ -116,7 +125,7 @@ class RTSPClient(
                 "control_port=$localControlPort;timing_port=$localTimingPort"
 
         val request = buildString {
-            append("SETUP rtsp://$host/stream RTSP/1.0\r\n")
+            append("SETUP $baseUrl RTSP/1.0\r\n")
             append("CSeq: ${cSeq++}\r\n")
             append("Transport: $transportHeader\r\n")
             append("User-Agent: $USER_AGENT\r\n")
@@ -131,7 +140,7 @@ class RTSPClient(
         }
 
         response.headers["Session"]?.let {
-            sessionId = it.split(";").firstOrNull()?.trim()
+            serverSessionId = it.split(";").firstOrNull()?.trim()
         }
 
         val transport = response.headers["Transport"]
@@ -161,15 +170,14 @@ class RTSPClient(
     }
 
     suspend fun sendRecord(startSeq: Int, startRtpTime: Long): Boolean = withContext(Dispatchers.IO) {
+        val sessionHeader = serverSessionId ?: sessionId
         val request = buildString {
-            append("RECORD rtsp://$host/stream RTSP/1.0\r\n")
+            append("RECORD $baseUrl RTSP/1.0\r\n")
             append("CSeq: ${cSeq++}\r\n")
-            sessionId?.let { append("Session: $it\r\n") }
+            append("Session: $sessionHeader\r\n")
             append("Range: npt=0-\r\n")
             append("RTP-Info: seq=$startSeq;rtptime=$startRtpTime\r\n")
             append("User-Agent: $USER_AGENT\r\n")
-            append("Client-Instance: $clientInstance\r\n")
-            append("DACP-ID: $dacpId\r\n")
             append("\r\n")
         }
 
@@ -178,21 +186,20 @@ class RTSPClient(
     }
 
     suspend fun sendVolume(percent: Float): Boolean = withContext(Dispatchers.IO) {
-        // Map 0..100% to dB: 0% -> -144.0 (mute), 1..100% -> -30.0 dB .. 0.0 dB
         val volumeDb = if (percent <= 0f) {
             -144.0f
         } else {
             val clamped = percent.coerceIn(0f, 100f) / 100f
-            // Cubic root perceived volume curve matching Apple/PipeWire
             val linear = Math.cbrt(clamped.toDouble()).toFloat()
             (linear * 30.0f - 30.0f).coerceIn(-30.0f, 0.0f)
         }
 
         val body = String.format(Locale.US, "volume: %.6f\r\n", volumeDb)
+        val sessionHeader = serverSessionId ?: sessionId
         val request = buildString {
-            append("SET_PARAMETER rtsp://$host/stream RTSP/1.0\r\n")
+            append("SET_PARAMETER $baseUrl RTSP/1.0\r\n")
             append("CSeq: ${cSeq++}\r\n")
-            sessionId?.let { append("Session: $it\r\n") }
+            append("Session: $sessionHeader\r\n")
             append("Content-Type: text/parameters\r\n")
             append("Content-Length: ${body.length}\r\n")
             append("User-Agent: $USER_AGENT\r\n")
@@ -206,15 +213,16 @@ class RTSPClient(
 
     suspend fun sendTeardown(): Boolean = withContext(Dispatchers.IO) {
         try {
+            val sessionHeader = serverSessionId ?: sessionId
             val request = buildString {
-                append("TEARDOWN rtsp://$host/stream RTSP/1.0\r\n")
+                append("TEARDOWN $baseUrl RTSP/1.0\r\n")
                 append("CSeq: ${cSeq++}\r\n")
-                sessionId?.let { append("Session: $it\r\n") }
+                append("Session: $sessionHeader\r\n")
                 append("User-Agent: $USER_AGENT\r\n")
                 append("\r\n")
             }
             val response = sendAndReceive(request)
-            response.statusCode == 200
+            response.statusCode in 200..299 || response.statusCode == 501
         } catch (e: Exception) {
             Log.w(TAG, "Teardown error: ${e.message}")
             false

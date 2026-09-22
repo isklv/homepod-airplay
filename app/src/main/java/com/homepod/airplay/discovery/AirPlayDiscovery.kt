@@ -158,11 +158,20 @@ class AirPlayDiscovery(private val context: Context) {
                     val isHomePod = model.contains("AudioAccessory", ignoreCase = true) ||
                             displayName.contains("HomePod", ignoreCase = true)
 
+                    val isRaop = rawName.contains("@")
+                    val effectivePort = if (isRaop && port > 0) {
+                        port
+                    } else if (port == 7000 || port <= 0) {
+                        5000
+                    } else {
+                        port
+                    }
+
                     val device = AirPlayDevice(
                         id = rawName,
                         name = displayName,
                         ip = hostAddress,
-                        port = if (port > 0) port else 5000,
+                        port = effectivePort,
                         model = model,
                         isHomePod = isHomePod
                     )
@@ -172,7 +181,14 @@ class AirPlayDiscovery(private val context: Context) {
                     _discoveredDevices.update { current ->
                         val existingIndex = current.indexOfFirst { it.ip == device.ip }
                         if (existingIndex >= 0) {
-                            current.toMutableList().apply { set(existingIndex, device) }
+                            val existing = current[existingIndex]
+                            // If existing device already has RAOP id (with @) or port 5000, preserve it
+                            val updated = if (!isRaop && existing.port == 5000) {
+                                existing.copy(model = if (model != "HomePod") model else existing.model)
+                            } else {
+                                device
+                            }
+                            current.toMutableList().apply { set(existingIndex, updated) }
                         } else {
                             current + device
                         }

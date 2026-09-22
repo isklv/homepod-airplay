@@ -18,16 +18,13 @@ import javax.crypto.Cipher
 
 class RtpAudioSender(
     private val targetIp: String,
-    private val serverPort: Int,
-    private val controlPort: Int,
-    private val timingPort: Int,
-    private val aesKey: ByteArray,
-    private val aesIv: ByteArray
+    private val aesKey: ByteArray? = null,
+    private val aesIv: ByteArray? = null
 ) {
     companion object {
         private const val TAG = "RtpAudioSender"
         const val FRAMES_PER_PACKET = 352
-        const val BYTES_PER_FRAME = 4 // 16-bit stereo (2 bytes L + 2 bytes R)
+        const val BYTES_PER_FRAME = 4 // 16-bit stereo
         const val CHUNK_SIZE = FRAMES_PER_PACKET * BYTES_PER_FRAME // 1408 bytes
         private const val NTP_OFFSET = 0x83AA7E80L
     }
@@ -43,15 +40,24 @@ class RtpAudioSender(
     val localTimingPort: Int
         get() = timingSocket?.localPort ?: 0
 
+    private var serverPort = 0
+    private var serverCtrlPort = 0
+
     private val audioQueue = ArrayBlockingQueue<ByteArray>(64)
     private var streamJob: Job? = null
     private var timingJob: Job? = null
 
     @Volatile
     private var isStreaming = false
+    @Volatile
+    private var isTimingListening = false
 
-    private val aesCipher: Cipher by lazy {
-        AirPlayCrypto.createAesCipher(aesKey, aesIv)
+    private val aesCipher: Cipher? by lazy {
+        if (aesKey != null && aesIv != null) {
+            AirPlayCrypto.createAesCipher(aesKey, aesIv)
+        } else {
+            null
+        }
     }
 
     private val bitWriter = BitWriter(2048)
@@ -70,16 +76,86 @@ class RtpAudioSender(
         audioSocket = DatagramSocket()
     }
 
-    fun start(scope: CoroutineScope) {
+    /**
+     * Start the timing listener socket BEFORE RTSP SETUP is sent,
+     * so HomePod's setup ping is received and replied to immediately.
+     */
+    fun startTimingListener(scope: CoroutineScope) {
+        if (isTimingListening) return
+        isTimingListening = true
+
+        timingJob = scope.launch(Dispatchers.IO) {
+            val socket = timingSocket ?: return@launch
+            val recvBuffer = ByteArray(128)
+            val recvPacket = DatagramPacket(recvBuffer, recvBuffer.size)
+
+            val replyBuffer = ByteArray(32)
+            val replyPacket = DatagramPacket(replyBuffer, replyBuffer.size)
+
+            Log.d(TAG, "Timing listener listening on UDP port ${socket.localPort}")
+
+            while (isActive && isTimingListening) {
+                try {
+                    socket.receive(recvPacket)
+                    val len = recvPacket.length
+                    if (len >= 32) {
+                        val recvTime = getNtpTimestamp()
+
+                        // Extract remote NTP timestamp from offset 24..32
+                        val remSec = ByteBuffer.wrap(recvBuffer, 24, 4).int
+                        val remFrac = ByteBuffer.wrap(recvBuffer, 28, 4).int
+                        val transTime = getNtpTimestamp()
+
+                        // Build RTP PT 83 timing reply (32 bytes)
+                        val bb = ByteBuffer.wrap(replyBuffer).order(ByteOrder.BIG_ENDIAN)
+                        bb.clear()
+                        bb.put(0x80.toByte()) // v=2
+                        bb.put(0xD3.toByte()) // m=1, PT=83
+                        bb.putShort(0)
+                        bb.putInt(0) // timestamp
+
+                        // Remote time
+                        bb.putInt(remSec)
+                        bb.putInt(remFrac)
+
+                        // Received time
+                        bb.putInt((recvTime ushr 32).toInt())
+                        bb.putInt((recvTime and 0xFFFFFFFFL).toInt())
+
+                        // Transmit time
+                        bb.putInt((transTime ushr 32).toInt())
+                        bb.putInt((transTime and 0xFFFFFFFFL).toInt())
+
+                        replyPacket.address = recvPacket.address
+                        replyPacket.port = recvPacket.port
+                        replyPacket.length = 32
+
+                        socket.send(replyPacket)
+                    }
+                } catch (e: Exception) {
+                    if (isTimingListening) {
+                        Log.w(TAG, "Timing socket receive: ${e.message}")
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Start the audio data streaming loop once SETUP has provided remote server and control ports.
+     */
+    fun startAudioStream(scope: CoroutineScope, remoteServerPort: Int, remoteCtrlPort: Int) {
         if (isStreaming) return
         isStreaming = true
+        serverPort = remoteServerPort
+        serverCtrlPort = remoteCtrlPort
 
-        startTimingListener(scope)
         startAudioStreamer(scope)
     }
 
     fun stop() {
         isStreaming = false
+        isTimingListening = false
         streamJob?.cancel()
         timingJob?.cancel()
         audioQueue.clear()
@@ -101,71 +177,10 @@ class RtpAudioSender(
             val chunk = ByteArray(CHUNK_SIZE)
             System.arraycopy(pcmData, offset, chunk, 0, CHUNK_SIZE)
             if (!audioQueue.offer(chunk)) {
-                // If queue is full, drop oldest frame to maintain low latency
                 audioQueue.poll()
                 audioQueue.offer(chunk)
             }
             offset += CHUNK_SIZE
-        }
-    }
-
-    private fun startTimingListener(scope: CoroutineScope) {
-        timingJob = scope.launch(Dispatchers.IO) {
-            val socket = timingSocket ?: return@launch
-            val recvBuffer = ByteArray(128)
-            val recvPacket = DatagramPacket(recvBuffer, recvBuffer.size)
-
-            val replyBuffer = ByteArray(32)
-            val replyPacket = DatagramPacket(replyBuffer, replyBuffer.size)
-
-            Log.d(TAG, "Timing listener started on UDP port ${socket.localPort}")
-
-            while (isActive && isStreaming) {
-                try {
-                    socket.receive(recvPacket)
-                    val len = recvPacket.length
-                    if (len >= 32) {
-                        // Received timing request from HomePod
-                        val recvTime = getNtpTimestamp()
-
-                        // Extract remote NTP timestamp from offset 24 (or 16)
-                        val remoteTimeHigh = ByteBuffer.wrap(recvBuffer, 24, 4).int.toLong() and 0xFFFFFFFFL
-                        val remoteTimeLow = ByteBuffer.wrap(recvBuffer, 28, 4).int.toLong() and 0xFFFFFFFFL
-
-                        val replyTime = getNtpTimestamp()
-
-                        // Build RTP PT 83 timing reply (32 bytes)
-                        val bb = ByteBuffer.wrap(replyBuffer).order(ByteOrder.BIG_ENDIAN)
-                        bb.clear()
-                        bb.put(0x80.toByte()) // v=2
-                        bb.put(0xD3.toByte()) // m=1, PT=83 (0x53 or 0xD3)
-                        bb.putShort(0)
-                        bb.putInt(0) // timestamp
-
-                        // Remote time
-                        bb.putInt((remoteTimeHigh and 0xFFFFFFFFL).toInt())
-                        bb.putInt((remoteTimeLow and 0xFFFFFFFFL).toInt())
-
-                        // Received time
-                        bb.putInt((recvTime ushr 32).toInt())
-                        bb.putInt((recvTime and 0xFFFFFFFFL).toInt())
-
-                        // Transmit time
-                        bb.putInt((replyTime ushr 32).toInt())
-                        bb.putInt((replyTime and 0xFFFFFFFFL).toInt())
-
-                        replyPacket.address = recvPacket.address
-                        replyPacket.port = recvPacket.port
-                        replyPacket.length = 32
-
-                        socket.send(replyPacket)
-                    }
-                } catch (e: Exception) {
-                    if (isStreaming) {
-                        Log.w(TAG, "Timing socket error: ${e.message}")
-                    }
-                }
-            }
         }
     }
 
@@ -189,18 +204,15 @@ class RtpAudioSender(
 
                 encodeAndSendChunk(socket, audioPacket, chunk)
 
-                // Every 100 packets send sync packet on control socket
                 if (++packetCount % 100 == 0) {
                     sendSyncPacket(destAddress, isFirst = false)
                 }
 
-                // Timing pace control (smooth 44.1kHz playback rate)
                 nextPacketTimeNs += frameDurationNs
                 val sleepNs = nextPacketTimeNs - System.nanoTime()
                 if (sleepNs > 1_000_000) {
                     TimeUnit.NANOSECONDS.sleep(sleepNs)
                 } else if (sleepNs < -50_000_000) {
-                    // Fell too far behind, resync clock
                     nextPacketTimeNs = System.nanoTime()
                 }
             }
@@ -212,7 +224,6 @@ class RtpAudioSender(
         packet: DatagramPacket,
         chunk: ByteArray
     ) {
-        // Encode ALAC uncompressed PCM frame
         bitWriter.reset()
         bitWriter.write(1, 3) // channel=1, stereo
         bitWriter.write(0, 4)
@@ -247,10 +258,12 @@ class RtpAudioSender(
         val payloadLen = bitWriter.totalBytes()
         val alacPayload = bitWriter.buffer
 
-        // Encrypt 16-byte blocks using AES-128-CBC
-        val encryptableLen = payloadLen and 0xF.inv() // round down to multiple of 16
-        if (encryptableLen > 0) {
-            aesCipher.update(alacPayload, 0, encryptableLen, alacPayload, 0)
+        // Encrypt only if cipher is configured (for HomePod mini it is unencrypted)
+        aesCipher?.let { cipher ->
+            val encryptableLen = payloadLen and 0xF.inv()
+            if (encryptableLen > 0) {
+                cipher.update(alacPayload, 0, encryptableLen, alacPayload, 0)
+            }
         }
 
         // Build 12-byte RTP header
@@ -262,7 +275,6 @@ class RtpAudioSender(
         bb.putInt((rtpTimestamp and 0xFFFFFFFFL).toInt())
         bb.putInt(ssrc)
 
-        // Append encrypted payload
         System.arraycopy(alacPayload, 0, packetBuffer, 12, payloadLen)
 
         val totalPacketSize = 12 + payloadLen
@@ -274,16 +286,17 @@ class RtpAudioSender(
 
     private fun sendSyncPacket(destAddress: InetAddress, isFirst: Boolean) {
         val socket = controlSocket ?: return
+        if (serverCtrlPort == 0) return
         try {
             val syncBuffer = ByteArray(20)
             val bb = ByteBuffer.wrap(syncBuffer).order(ByteOrder.BIG_ENDIAN)
 
-            val vByte = if (isFirst) 0x90.toByte() else 0x80.toByte() // v=2, x=1 if first
+            val vByte = if (isFirst) 0x90.toByte() else 0x80.toByte()
             bb.put(vByte)
-            bb.put(0xD4.toByte()) // m=1, PT=84 (0x54 or 0xD4)
-            bb.putShort(7) // sequence number
+            bb.put(0xD4.toByte()) // m=1, PT=84
+            bb.putShort(7)
 
-            val latency = 44100 // 1 sec latency in samples
+            val latency = 44100
             val currentRtp = (rtpTimestamp - latency).toInt()
             bb.putInt(currentRtp)
 
@@ -292,7 +305,7 @@ class RtpAudioSender(
             bb.putInt((ntp and 0xFFFFFFFFL).toInt())
             bb.putInt((rtpTimestamp and 0xFFFFFFFFL).toInt())
 
-            val syncPacket = DatagramPacket(syncBuffer, syncBuffer.size, destAddress, controlPort)
+            val syncPacket = DatagramPacket(syncBuffer, syncBuffer.size, destAddress, serverCtrlPort)
             socket.send(syncPacket)
         } catch (e: Exception) {
             Log.w(TAG, "Sync packet error: ${e.message}")

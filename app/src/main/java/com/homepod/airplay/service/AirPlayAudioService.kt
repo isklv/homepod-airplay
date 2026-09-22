@@ -90,68 +90,51 @@ class AirPlayAudioService : Service() {
         resultCode: Int = 0,
         projectionData: Intent? = null
     ) {
+        // Critical for Android 14 / Samsung: Start foreground BEFORE media projection and network operations
+        startForegroundWithNotification(device)
+        _streamState.value = StreamState.Connecting(device)
+
         serviceScope.launch(Dispatchers.IO) {
             try {
-                _streamState.value = StreamState.Connecting(device)
-                updateNotification("Connecting to ${device.name}…")
+                // Step 1: Initialize RTP Sender and start timing listener BEFORE sending SETUP
+                // HomePod pings timing_port during SETUP to verify the client!
+                val sender = RtpAudioSender(device.ip)
+                rtpSender = sender
+                sender.startTimingListener(serviceScope)
 
-                // Step 1: Create RTSP connection
+                // Step 2: Connect RTSP socket
                 val client = RTSPClient(device.ip, device.port)
                 rtspClient = client
                 client.connect(timeoutMs = 5000)
 
-                // Step 2: Send OPTIONS
+                // Step 3: Send OPTIONS
                 if (!client.sendOptions()) {
                     throw IllegalStateException("OPTIONS handshake failed")
                 }
 
-                // Step 3: Prepare cryptographic keys
-                val aesKey = AirPlayCrypto.generateRandomBytes(16)
-                val aesIv = AirPlayCrypto.generateRandomBytes(16)
-                val localIp = getLocalIpAddress() ?: "0.0.0.0"
-
-                // Step 4: Send ANNOUNCE
-                if (!client.sendAnnounce(localIp, aesKey, aesIv)) {
+                // Step 4: Send ANNOUNCE (unencrypted for HomePod mini)
+                if (!client.sendAnnounce(encrypted = false)) {
                     throw IllegalStateException("ANNOUNCE handshake failed")
                 }
 
-                // Step 5: Initialize RTP Sender sockets and send SETUP
-                val sender = RtpAudioSender(
-                    targetIp = device.ip,
-                    serverPort = 0, // will be updated from SETUP response
-                    controlPort = 0,
-                    timingPort = 0,
-                    aesKey = aesKey,
-                    aesIv = aesIv
-                )
-
+                // Step 5: Send SETUP (HomePod probes timing port and receives immediate response)
                 val setupResult = client.sendSetup(
                     localControlPort = sender.localControlPort,
                     localTimingPort = sender.localTimingPort
                 )
-
-                // Recreate or configure sender with negotiated remote ports
-                sender.stop()
-                val configuredSender = RtpAudioSender(
-                    targetIp = device.ip,
-                    serverPort = setupResult.serverPort,
-                    controlPort = setupResult.controlPort,
-                    timingPort = setupResult.timingPort,
-                    aesKey = aesKey,
-                    aesIv = aesIv
-                )
-                rtpSender = configuredSender
-                configuredSender.start(serviceScope)
 
                 // Step 6: Send RECORD
                 if (!client.sendRecord(startSeq = 0, startRtpTime = 0)) {
                     throw IllegalStateException("RECORD request failed")
                 }
 
-                // Step 7: Set initial volume
+                // Step 7: Set volume
                 client.sendVolume(_currentVolume.value)
 
-                // Step 8: Start Audio Source (System Audio Capture or Test Tone)
+                // Step 8: Start audio streaming loop to negotiated server ports
+                sender.startAudioStream(serviceScope, setupResult.serverPort, setupResult.controlPort)
+
+                // Step 9: Start Audio Source (System Audio Capture or Test Tone)
                 if (sourceType == AudioSourceType.SYSTEM_CAPTURE && projectionData != null) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -159,7 +142,7 @@ class AirPlayAudioService : Service() {
                         mediaProjection = projection
 
                         val capture = AudioCaptureManager(projection) { buffer, length ->
-                            configuredSender.queueAudio(buffer, length)
+                            sender.queueAudio(buffer, length)
                         }
                         audioCapture = capture
                         capture.start(serviceScope)
@@ -167,22 +150,22 @@ class AirPlayAudioService : Service() {
                         throw IllegalStateException("System audio capture requires Android 10+")
                     }
                 } else {
-                    // Test tone mode
                     val toneGen = TestToneGenerator { buffer, length ->
-                        configuredSender.queueAudio(buffer, length)
+                        sender.queueAudio(buffer, length)
                     }
                     testToneGenerator = toneGen
                     toneGen.start(serviceScope)
                 }
 
                 _streamState.value = StreamState.Streaming(device, sourceType)
-                startForegroundWithNotification(device)
+                updateNotification("Streaming to ${device.name}")
                 Log.d(TAG, "Streaming to ${device.name} successfully established!")
 
             } catch (e: Exception) {
                 Log.e(TAG, "Streaming error: ${e.message}", e)
                 cleanup()
                 _streamState.value = StreamState.Error(e.message ?: "Failed to connect to ${device.name}")
+                stopForeground(STOP_FOREGROUND_REMOVE)
             }
         }
     }
