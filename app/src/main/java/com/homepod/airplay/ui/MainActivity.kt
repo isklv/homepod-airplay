@@ -102,6 +102,7 @@ class MainActivity : ComponentActivity() {
 
                 val discoveredDevices by airPlayDiscovery.discoveredDevices.collectAsState()
                 val isScanning by airPlayDiscovery.isScanning.collectAsState()
+                val scanRemainingSeconds by airPlayDiscovery.scanRemainingSeconds.collectAsState()
                 val currentVolume by (audioService?.currentVolume ?: kotlinx.coroutines.flow.emptyFlow())
                     .collectAsState(initial = 50f)
                 val mutePhoneSpeaker by (audioService?.mutePhoneSpeaker ?: kotlinx.coroutines.flow.emptyFlow())
@@ -113,6 +114,7 @@ class MainActivity : ComponentActivity() {
                     streamState = streamState,
                     discoveredDevices = discoveredDevices,
                     isScanning = isScanning,
+                    scanRemainingSeconds = scanRemainingSeconds,
                     currentVolume = currentVolume,
                     selectedSource = selectedSourceType,
                     selectedLatencyMs = latencyMs,
@@ -120,7 +122,9 @@ class MainActivity : ComponentActivity() {
                     onToggleMutePhoneSpeaker = { audioService?.setMutePhoneSpeaker(it) },
                     onLatencySelected = { audioService?.setLatencyMs(it) },
                     onSourceSelected = { selectedSourceType = it },
-                    onRefreshScan = { airPlayDiscovery.startDiscovery() },
+                    onRefreshScan = { airPlayDiscovery.startDiscovery(10) },
+                    onStopScan = { airPlayDiscovery.stopDiscovery() },
+                    onRemoveDevice = { airPlayDiscovery.removeDevice(it) },
                     onConnectDevice = { device -> handleConnectDevice(device) },
                     onStopStreaming = { audioService?.stopStreaming() },
                     onVolumeChanged = { newVolume -> audioService?.setVolume(newVolume) },
@@ -169,7 +173,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        airPlayDiscovery.startDiscovery()
+        if (airPlayDiscovery.discoveredDevices.value.isEmpty()) {
+            airPlayDiscovery.startDiscovery(10)
+        }
     }
 
     override fun onPause() {

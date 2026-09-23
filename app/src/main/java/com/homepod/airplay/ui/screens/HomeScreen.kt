@@ -26,10 +26,13 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.CastConnected
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Speaker
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Warning
@@ -84,6 +87,7 @@ fun HomeScreen(
     streamState: StreamState,
     discoveredDevices: List<AirPlayDevice>,
     isScanning: Boolean,
+    scanRemainingSeconds: Int = 0,
     currentVolume: Float,
     selectedSource: AudioSourceType,
     selectedLatencyMs: Int = 500,
@@ -92,6 +96,8 @@ fun HomeScreen(
     onLatencySelected: (Int) -> Unit = {},
     onSourceSelected: (AudioSourceType) -> Unit,
     onRefreshScan: () -> Unit,
+    onStopScan: () -> Unit = {},
+    onRemoveDevice: (AirPlayDevice) -> Unit = {},
     onConnectDevice: (AirPlayDevice) -> Unit,
     onStopStreaming: () -> Unit,
     onVolumeChanged: (Float) -> Unit,
@@ -121,7 +127,9 @@ fun HomeScreen(
                     IconButton(onClick = { showGuideDialog = true }) {
                         Icon(Icons.AutoMirrored.Filled.HelpOutline, contentDescription = "Setup Guide")
                     }
-                    IconButton(onClick = onRefreshScan) {
+                    IconButton(onClick = {
+                        if (isScanning) onStopScan() else onRefreshScan()
+                    }) {
                         if (isScanning) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(20.dp),
@@ -129,7 +137,7 @@ fun HomeScreen(
                                 color = AirPlayBlue
                             )
                         } else {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh Scan")
+                            Icon(Icons.Default.Refresh, contentDescription = "Поиск устройств")
                         }
                     }
                 },
@@ -226,26 +234,52 @@ fun HomeScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Available Speakers",
+                            text = "Колонки AirPlay",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = if (isScanning) "Searching local Wi-Fi for HomePod…" else "${discoveredDevices.size} speaker(s) found",
+                            text = if (isScanning) {
+                                if (scanRemainingSeconds > 0) "Поиск в сети ($scanRemainingSeconds сек)..." else "Поиск в сети..."
+                            } else {
+                                if (discoveredDevices.isEmpty()) "Колонки не найдены" else "${discoveredDevices.size} найдено"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
 
-                    OutlinedButton(
-                        onClick = { showManualDialog = true },
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Add IP", fontSize = 13.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (isScanning) {
+                            FilledTonalButton(
+                                onClick = onStopScan,
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Стоп${if (scanRemainingSeconds > 0) " (${scanRemainingSeconds}с)" else ""}", fontSize = 13.sp)
+                            }
+                        } else {
+                            Button(
+                                onClick = onRefreshScan,
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Поиск (10с)", fontSize = 13.sp)
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = { showManualDialog = true },
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("IP", fontSize = 13.sp)
+                        }
                     }
                 }
 
@@ -259,7 +293,7 @@ fun HomeScreen(
             }
 
             // Discovered Devices List
-            if (discoveredDevices.isEmpty() && !isScanning) {
+            if (discoveredDevices.isEmpty()) {
                 item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -280,26 +314,37 @@ fun HomeScreen(
                             )
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(
-                                "No AirPlay speakers found yet",
+                                if (isScanning) "Поиск колонок в Wi-Fi..." else "Колонки пока не найдены",
                                 fontWeight = FontWeight.SemiBold,
                                 style = MaterialTheme.typography.bodyLarge
                             )
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                "Make sure your HomePod mini is on the same Wi-Fi network.",
+                                if (isScanning)
+                                    "Сканирование сети продлится еще $scanRemainingSeconds сек или нажмите «Остановить»."
+                                else
+                                    "Нажмите кнопку ниже, чтобы запустить 10-секундный поиск HomePod в сети, или добавьте IP вручную.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
                             )
                             Spacer(modifier = Modifier.height(16.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(onClick = onRefreshScan) {
-                                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Scan Again")
+                                if (isScanning) {
+                                    FilledTonalButton(onClick = onStopScan) {
+                                        Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Остановить")
+                                    }
+                                } else {
+                                    Button(onClick = onRefreshScan) {
+                                        Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Поиск (10 сек)")
+                                    }
                                 }
                                 OutlinedButton(onClick = { showManualDialog = true }) {
-                                    Text("Enter IP Directly")
+                                    Text("Указать IP")
                                 }
                             }
                         }
@@ -311,7 +356,8 @@ fun HomeScreen(
                         device = device,
                         isConnecting = streamState is StreamState.Connecting && streamState.device.ip == device.ip,
                         isStreaming = streamState is StreamState.Streaming && streamState.device.ip == device.ip,
-                        onConnect = { onConnectDevice(device) }
+                        onConnect = { onConnectDevice(device) },
+                        onRemove = { onRemoveDevice(device) }
                     )
                 }
             }
@@ -589,7 +635,8 @@ fun DeviceItemCard(
     device: AirPlayDevice,
     isConnecting: Boolean,
     isStreaming: Boolean,
-    onConnect: () -> Unit
+    onConnect: () -> Unit,
+    onRemove: (() -> Unit)? = null
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -652,31 +699,48 @@ fun DeviceItemCard(
 
             Spacer(modifier = Modifier.width(8.dp))
 
-            when {
-                isStreaming -> {
-                    FilledTonalButton(
-                        onClick = {},
-                        enabled = false,
-                        shape = RoundedCornerShape(8.dp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (!isStreaming && !isConnecting && onRemove != null) {
+                    IconButton(
+                        onClick = onRemove,
+                        modifier = Modifier.size(36.dp)
                     ) {
-                        Text("Active", color = SuccessGreen, fontWeight = FontWeight.Bold)
+                        Icon(
+                            Icons.Default.DeleteOutline,
+                            contentDescription = "Удалить из списка",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                            modifier = Modifier.size(18.dp)
+                        )
                     }
+                    Spacer(modifier = Modifier.width(4.dp))
                 }
-                isConnecting -> {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(28.dp),
-                        strokeWidth = 2.5.dp,
-                        color = AirPlayBlue
-                    )
-                }
-                else -> {
-                    Button(
-                        onClick = onConnect,
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Stream")
+
+                when {
+                    isStreaming -> {
+                        FilledTonalButton(
+                            onClick = {},
+                            enabled = false,
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Active", color = SuccessGreen, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    isConnecting -> {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(28.dp),
+                            strokeWidth = 2.5.dp,
+                            color = AirPlayBlue
+                        )
+                    }
+                    else -> {
+                        Button(
+                            onClick = onConnect,
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Stream")
+                        }
                     }
                 }
             }
