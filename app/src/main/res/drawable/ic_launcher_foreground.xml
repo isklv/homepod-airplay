@@ -3,10 +3,37 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Top Sonic Broadcast Waves -->
     <path
-        android:fillColor="#FF2196F3"
-        android:pathData="M54,18 A36,36 0 1,0 54,90 A36,36 0 1,0 54,18 Z" />
+        android:strokeColor="#5500E5FF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M26,38 A38,38 0 0,1 82,38" />
     <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M44,40 L68,54 L44,68 Z" />
+        android:strokeColor="#AA00E5FF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M34,45 A26,26 0 0,1 74,45" />
+
+    <!-- AirPlay Triangle (Upward cast arrow with rounded aesthetic) -->
+    <path
+        android:fillColor="#FF00E5FF"
+        android:pathData="M54,34 L74,62 L34,62 Z" />
+
+    <!-- Triangle Inner Cutout Accent -->
+    <path
+        android:fillColor="#FF0D1117"
+        android:pathData="M54,44 L64,58 L44,58 Z" />
+
+    <!-- AirPlay Base Bar with Rounded Ends -->
+    <path
+        android:fillColor="#FF7C4DFF"
+        android:pathData="M34,67 H74 A3,3 0 0,1 77,70 A3,3 0 0,1 74,73 H34 A3,3 0 0,1 31,70 A3,3 0 0,1 34,67 Z" />
+
+    <!-- Bottom Sonic Resonance Wave -->
+    <path
+        android:strokeColor="#887C4DFF"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M38,79 A20,20 0 0,0 70,79" />
 </vector>
