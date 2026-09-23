@@ -285,7 +285,7 @@ class AirPlayAudioService : Service() {
                 cleanup()
                 val isVpn = NetworkUtils.isVpnActive(this@AirPlayAudioService)
                 val userMsg = if (isVpn && (e is java.net.SocketTimeoutException || e is java.net.SocketException || e.message?.contains("10.8.") == true || e.message?.contains("EPERM") == true)) {
-                    "Блокировка VPN: на телефоне активен VPN, который блокирует доступ к локальной сети (${device.ip}). Добавьте HomePod Streamer в исключения VPN (Раздельное туннелирование) или временно отключите VPN."
+                    "Блокировка VPN: на телефоне активен VPN, который блокирует доступ к локальной сети (${device.ip}). Добавьте AndroidAirPlay в исключения VPN (Раздельное туннелирование) или временно отключите VPN."
                 } else {
                     e.message ?: "Не удалось подключиться к ${device.name}"
                 }

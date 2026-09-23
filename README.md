@@ -1,6 +1,6 @@
-# HomePod AirPlay Audio Streamer for Android
+# AndroidAirPlay
 
-Android-приложение на Kotlin и Jetpack Compose для трансляции музыки с любого Android-устройства (версии Android 10+) на **Apple HomePod mini** и другие AirPlay-колонки.
+Android-приложение на Kotlin и Jetpack Compose для трансляции аудио с любого Android-устройства и ТВ-приставок (Android 10+) на **Apple HomePod mini** и другие AirPlay-колонки.
 
 ---
 

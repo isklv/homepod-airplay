@@ -120,7 +120,7 @@ fun HomeScreen(
                             modifier = Modifier.size(28.dp)
                         )
                         Spacer(modifier = Modifier.width(10.dp))
-                        Text("HomePod Streamer", fontWeight = FontWeight.Bold)
+                        Text("AndroidAirPlay", fontWeight = FontWeight.Bold)
                     }
                 },
                 actions = {
@@ -194,7 +194,7 @@ fun HomeScreen(
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "Добавьте «HomePod Streamer» в исключения вашего VPN (Раздельное туннелирование / Split Tunneling) или отключите VPN на время стриминга.",
+                                    text = "Добавьте «AndroidAirPlay» в исключения вашего VPN (Раздельное туннелирование / Split Tunneling) или отключите VPN на время стриминга.",
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
                                     fontSize = 12.sp
                                 )
@@ -851,7 +851,7 @@ fun HomePodGuideDialog(onDismiss: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
-                    "• Если у вас активен VPN (Amnezia, WireGuard и др.): добавьте «HomePod Streamer» в исключения VPN (Раздельное туннелирование) или отключите VPN во время трансляции.",
+                    "• Если у вас активен VPN (Amnezia, WireGuard и др.): добавьте «AndroidAirPlay» в исключения VPN (Раздельное туннелирование) или отключите VPN во время трансляции.",
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
