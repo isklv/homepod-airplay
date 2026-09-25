@@ -24,6 +24,8 @@ import com.homepod.airplay.audio.TestToneGenerator
 import com.homepod.airplay.crypto.AirPlayCrypto
 import com.homepod.airplay.data.model.AirPlayDevice
 import com.homepod.airplay.data.model.AudioSourceType
+import com.homepod.airplay.data.model.AudioStreamQuality
+import com.homepod.airplay.data.model.StreamQualityLevel
 import com.homepod.airplay.data.model.StreamState
 import com.homepod.airplay.protocol.NetworkUtils
 import com.homepod.airplay.protocol.RTSPClient
@@ -69,6 +71,9 @@ class AirPlayAudioService : Service() {
     private val _streamState = MutableStateFlow<StreamState>(StreamState.Disconnected)
     val streamState: StateFlow<StreamState> = _streamState.asStateFlow()
 
+    private val _streamQuality = MutableStateFlow(AudioStreamQuality())
+    val streamQuality: StateFlow<AudioStreamQuality> = _streamQuality.asStateFlow()
+
     private val _currentVolume = MutableStateFlow(50f)
     val currentVolume: StateFlow<Float> = _currentVolume.asStateFlow()
 
@@ -99,6 +104,7 @@ class AirPlayAudioService : Service() {
     private var testToneGenerator: TestToneGenerator? = null
     private var mediaProjection: MediaProjection? = null
     private var keepAliveJob: Job? = null
+    private var statsJob: Job? = null
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -279,6 +285,7 @@ class AirPlayAudioService : Service() {
                 }
 
                 startKeepAliveLoop()
+                startStatsLoop()
 
             } catch (e: Exception) {
                 Log.e(TAG, "Streaming error: ${e.message}", e)
@@ -298,23 +305,97 @@ class AirPlayAudioService : Service() {
     private fun startKeepAliveLoop() {
         keepAliveJob?.cancel()
         keepAliveJob = serviceScope.launch(Dispatchers.IO) {
-            Log.d(TAG, "Starting RTSP keep-alive loop (interval: 15s)")
+            Log.d(TAG, "Starting resilient RTSP keep-alive loop (10s interval, 3 retries)")
+            var consecutiveFailures = 0
             while (isActive && _streamState.value is StreamState.Streaming) {
-                delay(15_000)
+                delay(10_000)
                 if (!isActive || _streamState.value !is StreamState.Streaming) break
-                val client = rtspClient
-                if (client == null) break
+                val client = rtspClient ?: break
 
-                val ok = client.sendKeepAlive()
-                if (!ok) {
-                    Log.e(TAG, "RTSP keep-alive failed! Connection to HomePod lost.")
-                    withContext(Dispatchers.Main) {
-                        _streamState.value = StreamState.Error("Связь с HomePod потеряна (таймаут соединения)")
-                        stopStreaming()
+                val result = client.sendKeepAlive()
+                if (result.success) {
+                    if (consecutiveFailures > 0) {
+                        Log.i(TAG, "RTSP keep-alive recovered after $consecutiveFailures failure(s)")
                     }
-                    break
+                    consecutiveFailures = 0
+                    Log.d(TAG, "RTSP keep-alive OK (RTT: ${result.rttMs}ms)")
                 } else {
-                    Log.d(TAG, "RTSP keep-alive OK")
+                    consecutiveFailures++
+                    Log.w(TAG, "RTSP keep-alive failed ($consecutiveFailures/3), RTT: ${result.rttMs}ms, status: ${result.statusCode}")
+                    if (consecutiveFailures >= 3) {
+                        Log.e(TAG, "RTSP keep-alive failed 3 consecutive times! Connection to HomePod lost.")
+                        withContext(Dispatchers.Main) {
+                            _streamState.value = StreamState.Error("Связь с HomePod потеряна (таймаут соединения)")
+                            stopStreaming()
+                        }
+                        break
+                    } else {
+                        // Quick retry delay after failure (2.5 seconds instead of waiting full 10s)
+                        delay(2500)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startStatsLoop() {
+        statsJob?.cancel()
+        statsJob = serviceScope.launch(Dispatchers.IO) {
+            val startTimeMs = System.currentTimeMillis()
+            var prevPackets = 0L
+            var prevBytes = 0L
+            var prevDrops = 0L
+            var prevUnderruns = 0L
+            var prevSocketErrors = 0L
+
+            while (isActive && _streamState.value is StreamState.Streaming) {
+                delay(1000)
+                if (!isActive || _streamState.value !is StreamState.Streaming) break
+
+                val sender = rtpSender
+                val client = rtspClient
+                if (sender != null) {
+                    val stats = sender.getStats()
+                    val nowMs = System.currentTimeMillis()
+                    val uptimeSec = ((nowMs - startTimeMs) / 1000L).coerceAtLeast(0L)
+
+                    val pps = (stats.packetsSent - prevPackets).toInt().coerceAtLeast(0)
+                    val bytesDelta = (stats.bytesSent - prevBytes).coerceAtLeast(0L)
+                    val bitrateKbps = ((bytesDelta * 8) / 1000).toInt()
+
+                    val dropsDelta = stats.bufferDrops - prevDrops
+                    val underrunsDelta = stats.bufferUnderruns - prevUnderruns
+                    val socketErrorsDelta = stats.socketErrors - prevSocketErrors
+                    val pingMs = client?.lastPingMs ?: -1L
+
+                    val level = when {
+                        socketErrorsDelta > 0 || stats.socketErrors > 10 -> StreamQualityLevel.POOR
+                        dropsDelta > 2 || pingMs > 350 -> StreamQualityLevel.FAIR
+                        underrunsDelta > 4 || (pingMs in 150..350) -> StreamQualityLevel.GOOD
+                        else -> StreamQualityLevel.EXCELLENT
+                    }
+
+                    prevPackets = stats.packetsSent
+                    prevBytes = stats.bytesSent
+                    prevDrops = stats.bufferDrops
+                    prevUnderruns = stats.bufferUnderruns
+                    prevSocketErrors = stats.socketErrors
+
+                    _streamQuality.value = AudioStreamQuality(
+                        isStreaming = true,
+                        uptimeSeconds = uptimeSec,
+                        bitrateKbps = bitrateKbps,
+                        packetsSent = stats.packetsSent,
+                        bytesSent = stats.bytesSent,
+                        packetsPerSec = pps,
+                        bufferQueueSize = stats.queueSize,
+                        bufferCapacity = stats.queueCapacity,
+                        bufferUnderruns = stats.bufferUnderruns,
+                        bufferDrops = stats.bufferDrops,
+                        socketErrors = stats.socketErrors,
+                        rtspPingMs = pingMs,
+                        qualityLevel = level
+                    )
                 }
             }
         }
@@ -347,6 +428,10 @@ class AirPlayAudioService : Service() {
     private fun cleanup() {
         keepAliveJob?.cancel()
         keepAliveJob = null
+
+        statsJob?.cancel()
+        statsJob = null
+        _streamQuality.value = AudioStreamQuality()
 
         restorePhoneVolume()
 

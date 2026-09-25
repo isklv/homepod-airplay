@@ -24,6 +24,7 @@ import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import com.homepod.airplay.data.model.AirPlayDevice
 import com.homepod.airplay.data.model.AudioSourceType
+import com.homepod.airplay.data.model.AudioStreamQuality
 import com.homepod.airplay.data.model.StreamState
 import com.homepod.airplay.discovery.AirPlayDiscovery
 import com.homepod.airplay.service.AirPlayAudioService
@@ -99,6 +100,8 @@ class MainActivity : ComponentActivity() {
             HomePodAirPlayTheme {
                 val streamState by (audioService?.streamState ?: kotlinx.coroutines.flow.emptyFlow())
                     .collectAsState(initial = StreamState.Disconnected)
+                val streamQuality by (audioService?.streamQuality ?: kotlinx.coroutines.flow.emptyFlow())
+                    .collectAsState(initial = AudioStreamQuality())
 
                 val discoveredDevices by airPlayDiscovery.discoveredDevices.collectAsState()
                 val isScanning by airPlayDiscovery.isScanning.collectAsState()
@@ -112,6 +115,7 @@ class MainActivity : ComponentActivity() {
 
                 HomeScreen(
                     streamState = streamState,
+                    streamQuality = streamQuality,
                     discoveredDevices = discoveredDevices,
                     isScanning = isScanning,
                     scanRemainingSeconds = scanRemainingSeconds,

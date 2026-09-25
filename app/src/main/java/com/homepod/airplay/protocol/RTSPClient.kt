@@ -57,7 +57,16 @@ class RTSPClient(
         return (10000000..99999999).random().toString()
     }
 
-    suspend fun connect(timeoutMs: Int = 5000) = withContext(Dispatchers.IO) {
+    var lastPingMs: Long = -1L
+        private set
+
+    data class KeepAliveResult(
+        val success: Boolean,
+        val rttMs: Long,
+        val statusCode: Int
+    )
+
+    suspend fun connect(timeoutMs: Int = 8000) = withContext(Dispatchers.IO) {
         Log.d(TAG, "Connecting RTSP socket to $host:$port...")
         val s = if (network != null) {
             try {
@@ -71,8 +80,10 @@ class RTSPClient(
         } else {
             Socket()
         }
+        s.tcpNoDelay = true
+        s.keepAlive = true
         s.connect(InetSocketAddress(host, port), timeoutMs)
-        s.soTimeout = timeoutMs
+        s.soTimeout = 10000 // 10s read timeout for RTSP commands to tolerate Wi-Fi jitter
         socket = s
         localIp = s.localAddress?.hostAddress ?: "0.0.0.0"
         writer = s.getOutputStream()
@@ -236,12 +247,12 @@ class RTSPClient(
         }
     }
 
-    suspend fun sendKeepAlive(): Boolean = mutex.withLock {
+    suspend fun sendKeepAlive(): KeepAliveResult = mutex.withLock {
         withContext(Dispatchers.IO) {
             val s = socket
             if (s == null || s.isClosed || !s.isConnected) {
                 Log.w(TAG, "Cannot send keepalive: socket not connected")
-                return@withContext false
+                return@withContext KeepAliveResult(false, -1L, -1)
             }
 
             val sessionHeader = serverSessionId ?: sessionId
@@ -255,10 +266,13 @@ class RTSPClient(
                 append("\r\n")
             }
 
+            val startTime = System.currentTimeMillis()
             try {
                 val response = sendAndReceive(request)
+                val elapsed = System.currentTimeMillis() - startTime
                 if (response.statusCode in 200..299) {
-                    true
+                    lastPingMs = elapsed
+                    KeepAliveResult(true, elapsed, response.statusCode)
                 } else {
                     Log.w(TAG, "Keep-alive OPTIONS returned ${response.statusCode}, fallback to GET_PARAMETER")
                     val getReq = buildString {
@@ -269,11 +283,15 @@ class RTSPClient(
                         append("\r\n")
                     }
                     val getResp = sendAndReceive(getReq)
-                    getResp.statusCode in 200..299
+                    val totalElapsed = System.currentTimeMillis() - startTime
+                    val ok = getResp.statusCode in 200..299
+                    if (ok) lastPingMs = totalElapsed
+                    KeepAliveResult(ok, totalElapsed, getResp.statusCode)
                 }
             } catch (e: Exception) {
+                val elapsed = System.currentTimeMillis() - startTime
                 Log.w(TAG, "RTSP keep-alive exception: ${e.message}")
-                false
+                KeepAliveResult(false, elapsed, -1)
             }
         }
     }
@@ -324,7 +342,12 @@ class RTSPClient(
         out.write(request.toByteArray(Charsets.ISO_8859_1))
         out.flush()
 
-        val statusLine = inp.readLine() ?: throw IllegalStateException("Connection closed by server")
+        // Skip leading blank lines if any (e.g. leftover CRLF from previous payload)
+        var statusLine = ""
+        while (statusLine.isBlank()) {
+            val line = inp.readLine() ?: throw IllegalStateException("Connection closed by server")
+            statusLine = line.trim()
+        }
         Log.d(TAG, "<<< RTSP STATUS: $statusLine")
 
         val parts = statusLine.split(" ", limit = 3)

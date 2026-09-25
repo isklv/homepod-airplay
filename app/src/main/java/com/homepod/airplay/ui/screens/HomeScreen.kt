@@ -75,6 +75,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.homepod.airplay.data.model.AirPlayDevice
 import com.homepod.airplay.data.model.AudioSourceType
+import com.homepod.airplay.data.model.AudioStreamQuality
+import com.homepod.airplay.data.model.StreamQualityLevel
 import com.homepod.airplay.data.model.StreamState
 import com.homepod.airplay.ui.theme.AirPlayBlue
 import com.homepod.airplay.ui.theme.ErrorRed
@@ -85,6 +87,7 @@ import com.homepod.airplay.ui.theme.WarningOrange
 @Composable
 fun HomeScreen(
     streamState: StreamState,
+    streamQuality: AudioStreamQuality = AudioStreamQuality(),
     discoveredDevices: List<AirPlayDevice>,
     isScanning: Boolean,
     scanRemainingSeconds: Int = 0,
@@ -160,6 +163,7 @@ fun HomeScreen(
             item {
                 ActiveStreamingCard(
                     streamState = streamState,
+                    streamQuality = streamQuality,
                     currentVolume = currentVolume,
                     selectedSource = selectedSource,
                     selectedLatencyMs = selectedLatencyMs,
@@ -420,6 +424,7 @@ fun HomeScreen(
 @Composable
 fun ActiveStreamingCard(
     streamState: StreamState,
+    streamQuality: AudioStreamQuality = AudioStreamQuality(),
     currentVolume: Float,
     selectedSource: AudioSourceType,
     selectedLatencyMs: Int = 500,
@@ -528,6 +533,10 @@ fun ActiveStreamingCard(
                         )
                     }
                     Spacer(modifier = Modifier.height(10.dp))
+
+                    // Audio Stream Quality Section
+                    AudioQualitySection(quality = streamQuality)
+                    Spacer(modifier = Modifier.height(12.dp))
                 }
 
                 // Audio Source Selector
@@ -869,4 +878,163 @@ fun HomePodGuideDialog(onDismiss: () -> Unit) {
             }
         }
     )
+}
+
+@Composable
+fun AudioQualitySection(quality: AudioStreamQuality) {
+    val qualityColor = when (quality.qualityLevel) {
+        StreamQualityLevel.EXCELLENT -> SuccessGreen
+        StreamQualityLevel.GOOD -> Color(0xFF30D158)
+        StreamQualityLevel.FAIR -> WarningOrange
+        StreamQualityLevel.POOR -> ErrorRed
+    }
+
+    val uptimeStr = remember(quality.uptimeSeconds) {
+        val mins = quality.uptimeSeconds / 60
+        val secs = quality.uptimeSeconds % 60
+        String.format(java.util.Locale.US, "%02d:%02d", mins, secs)
+    }
+
+    val bytesStr = remember(quality.bytesSent) {
+        val mb = quality.bytesSent / (1024.0 * 1024.0)
+        String.format(java.util.Locale.US, "%.1f МБ", mb)
+    }
+
+    val bitrateStr = remember(quality.bitrateKbps) {
+        if (quality.bitrateKbps >= 1000) {
+            String.format(java.util.Locale.US, "%.2f Мбит/с", quality.bitrateKbps / 1000f)
+        } else {
+            "${quality.bitrateKbps} кбит/с"
+        }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f)
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(qualityColor)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Качество аудиопотока",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
+                Surface(
+                    color = qualityColor.copy(alpha = 0.15f),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(
+                        text = quality.qualityLevel.label,
+                        color = qualityColor,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            // Stats 2x2 grid
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                QualityMetricItem(
+                    modifier = Modifier.weight(1f),
+                    label = "Битрейт",
+                    value = bitrateStr,
+                    detail = "${quality.packetsPerSec} пак/с"
+                )
+                QualityMetricItem(
+                    modifier = Modifier.weight(1f),
+                    label = "Буфер",
+                    value = "${quality.bufferQueueSize} / ${quality.bufferCapacity}",
+                    detail = if (quality.bufferDrops == 0L && quality.bufferUnderruns == 0L) {
+                        "Стабилен (0 потерь)"
+                    } else {
+                        "${quality.bufferDrops} др. • ${quality.bufferUnderruns} пуст"
+                    }
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                QualityMetricItem(
+                    modifier = Modifier.weight(1f),
+                    label = "Пинг RTSP",
+                    value = if (quality.rtspPingMs >= 0) "${quality.rtspPingMs} мс" else "ОК",
+                    detail = "Отклик HomePod"
+                )
+                QualityMetricItem(
+                    modifier = Modifier.weight(1f),
+                    label = "Передано",
+                    value = bytesStr,
+                    detail = "Время: $uptimeStr"
+                )
+            }
+
+            Text(
+                text = "Формат: 44.1 кГц • 16-бит стерео • Apple Lossless (ALAC)",
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+            )
+        }
+    }
+}
+
+@Composable
+fun QualityMetricItem(
+    modifier: Modifier = Modifier,
+    label: String,
+    value: String,
+    detail: String
+) {
+    Surface(
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+            Text(
+                text = label,
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = value,
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = detail,
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+            )
+        }
+    }
 }

@@ -42,6 +42,34 @@ class RtpAudioSender(
     val localTimingPort: Int
         get() = timingSocket?.localPort ?: 0
 
+    data class RtpStats(
+        val packetsSent: Long,
+        val bytesSent: Long,
+        val bufferUnderruns: Long,
+        val bufferDrops: Long,
+        val socketErrors: Long,
+        val queueSize: Int,
+        val queueCapacity: Int
+    )
+
+    private val packetsSentCount = java.util.concurrent.atomic.AtomicLong(0L)
+    private val bytesSentCount = java.util.concurrent.atomic.AtomicLong(0L)
+    private val underrunsCount = java.util.concurrent.atomic.AtomicLong(0L)
+    private val dropsCount = java.util.concurrent.atomic.AtomicLong(0L)
+    private val socketErrorsCount = java.util.concurrent.atomic.AtomicLong(0L)
+
+    fun getStats(): RtpStats {
+        return RtpStats(
+            packetsSent = packetsSentCount.get(),
+            bytesSent = bytesSentCount.get(),
+            bufferUnderruns = underrunsCount.get(),
+            bufferDrops = dropsCount.get(),
+            socketErrors = socketErrorsCount.get(),
+            queueSize = audioQueue.size,
+            queueCapacity = 128
+        )
+    }
+
     private var serverPort = 0
     private var serverCtrlPort = 0
 
@@ -78,21 +106,21 @@ class RtpAudioSender(
     init {
         controlSocket = DatagramSocket().apply {
             try {
-                sendBufferSize = 64 * 1024
-                receiveBufferSize = 64 * 1024
+                sendBufferSize = 128 * 1024
+                receiveBufferSize = 128 * 1024
             } catch (_: Exception) {}
         }
         network?.let { NetworkUtils.bindSocketToWifi(it, controlSocket) }
         timingSocket = DatagramSocket().apply {
             try {
-                sendBufferSize = 64 * 1024
-                receiveBufferSize = 64 * 1024
+                sendBufferSize = 128 * 1024
+                receiveBufferSize = 128 * 1024
             } catch (_: Exception) {}
         }
         network?.let { NetworkUtils.bindSocketToWifi(it, timingSocket) }
         audioSocket = DatagramSocket().apply {
             try {
-                sendBufferSize = 256 * 1024
+                sendBufferSize = 512 * 1024
             } catch (_: Exception) {}
         }
         network?.let { NetworkUtils.bindSocketToWifi(it, audioSocket) }
@@ -219,6 +247,7 @@ class RtpAudioSender(
                         // Queue full: drop oldest chunk to maintain real-time low latency
                         audioQueue.poll()
                         audioQueue.offer(chunk)
+                        dropsCount.incrementAndGet()
                     }
                 }
             }
@@ -227,6 +256,9 @@ class RtpAudioSender(
 
     private fun startAudioStreamer(scope: CoroutineScope) {
         streamJob = scope.launch(Dispatchers.IO) {
+            try {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+            } catch (_: Exception) {}
             val socket = audioSocket ?: return@launch
             val destAddress = InetAddress.getByName(targetIp)
 
@@ -251,13 +283,25 @@ class RtpAudioSender(
             val silenceChunk = ByteArray(CHUNK_SIZE)
 
             while (isActive && isStreaming) {
-                // Non-blocking poll first, very brief wait if needed to avoid CPU clock stalling
-                val chunk = audioQueue.poll() ?: audioQueue.poll(2, TimeUnit.MILLISECONDS) ?: silenceChunk
+                try {
+                    // Non-blocking poll first, very brief wait if needed to avoid CPU clock stalling
+                    val chunk = audioQueue.poll() ?: audioQueue.poll(2, TimeUnit.MILLISECONDS)
+                    val isUnderrun = (chunk == null)
+                    if (isUnderrun) {
+                        underrunsCount.incrementAndGet()
+                    }
+                    val dataToSend = chunk ?: silenceChunk
 
-                encodeAndSendChunk(socket, audioPacket, chunk)
+                    encodeAndSendChunk(socket, audioPacket, dataToSend)
+                    packetsSentCount.incrementAndGet()
+                    bytesSentCount.addAndGet(audioPacket.length.toLong())
 
-                if (++packetCount % 100 == 0) {
-                    sendSyncPacket(destAddress, isFirst = false)
+                    if (++packetCount % 100 == 0) {
+                        sendSyncPacket(destAddress, isFirst = false)
+                    }
+                } catch (e: Exception) {
+                    socketErrorsCount.incrementAndGet()
+                    Log.w(TAG, "Audio stream send error: ${e.message}")
                 }
 
                 nextPacketTimeNs += frameDurationNs
